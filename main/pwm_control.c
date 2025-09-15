@@ -1,0 +1,323 @@
+#include "pwm_control.h"
+
+#include "driver/ledc.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
+
+static const char *TAG = "pwm";
+
+// GPIO mapping
+static const int s_gpio[PWM_CHANNEL_COUNT] = {7, 8, 9, 10};
+
+// LEDC channels mapping
+static const ledc_channel_t s_ledc_ch[PWM_CHANNEL_COUNT] = {
+    LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_CHANNEL_2, LEDC_CHANNEL_3
+};
+
+// Use low speed mode, one shared timer
+static const ledc_mode_t s_mode = LEDC_LOW_SPEED_MODE;
+static const ledc_timer_t s_timer = LEDC_TIMER_0;
+static const ledc_timer_bit_t s_res = LEDC_TIMER_13_BIT; // higher resolution for smoother fades
+static uint32_t s_duty_max = 0; // (1<<res) - 1
+
+// Keep current target states
+static uint8_t s_states[PWM_CHANNEL_COUNT] = {0};
+
+// Timers for deferred GPIO mode changes after fade
+static TimerHandle_t s_defer_timers[PWM_CHANNEL_COUNT] = {0};
+
+// Pattern control (blink/strobe)
+typedef enum {
+    PATTERN_NONE = 0,
+    PATTERN_BLINK,
+    PATTERN_STROBE,
+} pattern_type_t;
+
+typedef struct {
+    pattern_type_t type;
+    TimerHandle_t timer;       // periodic toggle or scheduler
+    uint16_t period_ms;        // for blink
+    uint16_t pulse_dur_ms;     // for strobe: ON and OFF duration per pulse
+    uint16_t pause_ms;         // for strobe
+    uint8_t on_value;          // last non-zero value used when ON
+    uint8_t remaining_on_pulses; // for strobe: remaining ON pulses in current burst
+    uint8_t initial_pulses;    // for strobe: pulses per burst
+    bool phase_on;             // current phase: true=ON phase, false=OFF phase
+    bool in_pause;             // strobe: currently in pause window between bursts
+} pattern_state_t;
+
+static pattern_state_t s_pattern[PWM_CHANNEL_COUNT] = {0};
+
+// Forward declarations for helpers used in timer callback
+static void set_gpio_highz(int idx);
+static void set_gpio_high(int idx);
+// Forward declaration: internal apply that can skip canceling pattern
+static esp_err_t apply_value_internal(uint8_t channel, uint8_t value, uint16_t duration_ms, bool cancel_pattern, bool silent);
+
+static void pwm_defer_timer_cb(TimerHandle_t xTimer) {
+    int ch = (int)(intptr_t) pvTimerGetTimerID(xTimer);
+    if (ch < 0 || ch >= PWM_CHANNEL_COUNT) return;
+    uint8_t v = s_states[ch];
+    if (v == 0) {
+        set_gpio_highz(ch);
+    } else if (v == 255) {
+        set_gpio_high(ch);
+    }
+}
+
+static void pattern_timer_cb(TimerHandle_t xTimer) {
+    int ch = (int)(intptr_t) pvTimerGetTimerID(xTimer);
+    if (ch < 0 || ch >= PWM_CHANNEL_COUNT) return;
+    pattern_state_t *ps = &s_pattern[ch];
+    if (ps->type == PATTERN_BLINK) {
+        // Toggle between OFF and ON
+        ps->phase_on = !ps->phase_on;
+        uint8_t target = ps->phase_on ? (ps->on_value ? ps->on_value : 255) : 0;
+        // Immediate change, no fade
+        apply_value_internal((uint8_t)ch, target, 0, false, true);
+        // Keep timer running with half-period; create as periodic already
+    } else if (ps->type == PATTERN_STROBE) {
+        if (ps->in_pause) {
+            // Pause complete, start next burst
+            ps->in_pause = false;
+            // Reset pulses for new burst
+            ps->remaining_on_pulses = ps->initial_pulses;
+            ps->phase_on = false; // force transition to ON on next toggle
+            xTimerChangePeriod(ps->timer, pdMS_TO_TICKS(ps->pulse_dur_ms ? ps->pulse_dur_ms : 1), 0);
+            return;
+        }
+
+        // Toggle state
+        ps->phase_on = !ps->phase_on;
+        if (ps->phase_on) {
+            // Enter ON phase: apply ON and decrement pulses
+            uint8_t target = ps->on_value ? ps->on_value : 255;
+            apply_value_internal((uint8_t)ch, target, 0, false, true);
+            if (ps->remaining_on_pulses > 0) {
+                ps->remaining_on_pulses--;
+            }
+        } else {
+            // Enter OFF phase
+            apply_value_internal((uint8_t)ch, 0, 0, false, true);
+            // If completed all pulses in this burst, handle pause or stop
+            if (ps->remaining_on_pulses == 0) {
+                if (ps->pause_ms == 0) {
+                    // Stop pattern and leave OFF per spec when pause_ms==0
+                    pwm_control_stop_pattern((uint8_t)ch);
+                    return;
+                } else {
+                    // Enter pause window; stay OFF and schedule next burst after pause_ms
+                    ps->in_pause = true;
+                    // Use one-shot for pause duration
+                    xTimerChangePeriod(ps->timer, pdMS_TO_TICKS(ps->pause_ms), 0);
+                    return;
+                }
+            }
+        }
+        // Continue toggling with pulse duration for both ON and OFF
+        xTimerChangePeriod(ps->timer, pdMS_TO_TICKS(ps->pulse_dur_ms ? ps->pulse_dur_ms : 1), 0);
+    }
+}
+
+// Helper: attach LEDC to a channel's GPIO if not already
+static esp_err_t attach_ledc_channel(int idx) {
+    ledc_channel_config_t ch = {
+        .gpio_num = s_gpio[idx],
+        .speed_mode = s_mode,
+        .channel = s_ledc_ch[idx],
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = s_timer,
+        .duty = 0,
+        .hpoint = 0,
+        .flags = { .output_invert = 0 },
+    };
+    return ledc_channel_config(&ch);
+}
+
+// Helper: detach LEDC and set GPIO to input (High-Z)
+static void set_gpio_highz(int idx) {
+    // Stop LEDC driving this channel
+    ledc_stop(s_mode, s_ledc_ch[idx], 0 /* idle level low (ignored when we switch to input) */);
+    gpio_reset_pin(s_gpio[idx]);
+    gpio_set_direction(s_gpio[idx], GPIO_MODE_INPUT);
+    gpio_set_pull_mode(s_gpio[idx], GPIO_FLOATING);
+}
+
+// Helper: set GPIO high (switch mode ON)
+static void set_gpio_high(int idx) {
+    // Ensure LEDC is not driving; set direct GPIO high
+    ledc_stop(s_mode, s_ledc_ch[idx], 1 /* idle high */);
+    gpio_reset_pin(s_gpio[idx]);
+    gpio_set_direction(s_gpio[idx], GPIO_MODE_OUTPUT);
+    gpio_set_level(s_gpio[idx], 1);
+}
+
+esp_err_t pwm_control_init(void) {
+    // LEDC timer: 8-bit resolution, 1 kHz
+    ledc_timer_config_t t = {
+        .speed_mode = s_mode,
+        .duty_resolution = s_res,
+        .timer_num = s_timer,
+        .freq_hz = 1000,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&t));
+
+    s_duty_max = (1U << s_res) - 1U;
+    ESP_LOGI(TAG, "LEDC init: freq=%uHz res_bits=%d duty_max=%u", (unsigned)t.freq_hz, (int)s_res, (unsigned)s_duty_max);
+
+    // Install fade service for smooth transitions
+    ledc_fade_func_install(0);
+
+    // Initialize as High-Z (0) by default
+    for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
+        s_states[i] = 0;
+        set_gpio_highz(i);
+        s_defer_timers[i] = xTimerCreate("pwmDefer", pdMS_TO_TICKS(10), pdFALSE, (void *)(intptr_t)i, pwm_defer_timer_cb);
+        s_pattern[i].type = PATTERN_NONE;
+        s_pattern[i].timer = xTimerCreate("pwmPat", pdMS_TO_TICKS(100), pdTRUE, (void *)(intptr_t)i, pattern_timer_cb);
+        s_pattern[i].on_value = 255;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t apply_value_internal(uint8_t channel, uint8_t value, uint16_t duration_ms, bool cancel_pattern, bool silent) {
+    if (channel >= PWM_CHANNEL_COUNT) return ESP_ERR_INVALID_ARG;
+    if (cancel_pattern) {
+        pwm_control_stop_pattern(channel);
+    }
+    s_states[channel] = value;
+    if (!silent) {
+        ESP_LOGI(TAG, "apply ch=%u val=%u dur_ms=%u (cancel=%d)", channel, value, (unsigned)duration_ms, (int)cancel_pattern);
+    }
+
+    // Map 0..255 to high-resolution duty 0..s_duty_max
+    uint32_t duty_target = (uint32_t)value * s_duty_max / 255U;
+
+    // 0 -> High-Z
+    if (value == 0) {
+        if (duration_ms > 0) {
+            ESP_ERROR_CHECK(attach_ledc_channel(channel));
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], 0, duration_ms));
+            ESP_ERROR_CHECK(ledc_fade_start(s_mode, s_ledc_ch[channel], LEDC_FADE_NO_WAIT));
+            // Defer switching to High-Z until fade completes
+            xTimerStop(s_defer_timers[channel], 0);
+            xTimerChangePeriod(s_defer_timers[channel], pdMS_TO_TICKS(duration_ms + 5), 0);
+            xTimerStart(s_defer_timers[channel], 0);
+            if (!silent) ESP_LOGI(TAG, "ch=%u fade->0 for %u ms, then High-Z", channel, (unsigned)duration_ms);
+        } else {
+            set_gpio_highz(channel);
+            if (!silent) ESP_LOGI(TAG, "ch=%u set High-Z immediately", channel);
+        }
+        return ESP_OK;
+    }
+
+    // 255 -> constant high
+    if (value == 255) {
+        if (duration_ms > 0) {
+            ESP_ERROR_CHECK(attach_ledc_channel(channel));
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], s_duty_max, duration_ms));
+            ESP_ERROR_CHECK(ledc_fade_start(s_mode, s_ledc_ch[channel], LEDC_FADE_NO_WAIT));
+            xTimerStop(s_defer_timers[channel], 0);
+            xTimerChangePeriod(s_defer_timers[channel], pdMS_TO_TICKS(duration_ms + 5), 0);
+            xTimerStart(s_defer_timers[channel], 0);
+            if (!silent) ESP_LOGI(TAG, "ch=%u fade->255 for %u ms, then GPIO High", channel, (unsigned)duration_ms);
+        } else {
+            set_gpio_high(channel);
+            if (!silent) ESP_LOGI(TAG, "ch=%u set GPIO High immediately", channel);
+        }
+        return ESP_OK;
+    }
+
+    // 1..254 -> PWM
+    ESP_ERROR_CHECK(attach_ledc_channel(channel));
+    if (duration_ms > 0) {
+        ESP_ERROR_CHECK(ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], duty_target, duration_ms));
+        ESP_ERROR_CHECK(ledc_fade_start(s_mode, s_ledc_ch[channel], LEDC_FADE_NO_WAIT));
+        if (!silent) ESP_LOGI(TAG, "ch=%u PWM fade to val=%u duty=%u for %u ms", channel, value, (unsigned)duty_target, (unsigned)duration_ms);
+    } else {
+        ESP_ERROR_CHECK(ledc_set_duty(s_mode, s_ledc_ch[channel], duty_target));
+        ESP_ERROR_CHECK(ledc_update_duty(s_mode, s_ledc_ch[channel]));
+        if (!silent) ESP_LOGI(TAG, "ch=%u PWM set val=%u duty=%u immediately", channel, value, (unsigned)duty_target);
+    }
+    return ESP_OK;
+}
+
+static inline esp_err_t apply_value(uint8_t channel, uint8_t value, uint16_t duration_ms, bool cancel_pattern) {
+    return apply_value_internal(channel, value, duration_ms, cancel_pattern, false);
+}
+
+esp_err_t pwm_control_apply(uint8_t channel, uint8_t value, uint16_t duration_ms) {
+    return apply_value_internal(channel, value, duration_ms, true, false);
+}
+
+void pwm_control_get_states(uint8_t out[PWM_CHANNEL_COUNT]) {
+    for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) out[i] = s_states[i];
+}
+
+esp_err_t pwm_control_load_and_apply(const uint8_t *states) {
+    if (!states) return ESP_OK;
+    for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
+        (void) pwm_control_apply(i, states[i], 0);
+    }
+    return ESP_OK;
+}
+
+esp_err_t pwm_control_stop_pattern(uint8_t channel) {
+    if (channel >= PWM_CHANNEL_COUNT) return ESP_ERR_INVALID_ARG;
+    pattern_state_t *ps = &s_pattern[channel];
+    if (ps->timer) {
+        xTimerStop(ps->timer, 0);
+    }
+    ps->type = PATTERN_NONE;
+    ps->in_pause = false;
+    ps->phase_on = false;
+    return ESP_OK;
+}
+
+esp_err_t pwm_control_start_blink(uint8_t channel, uint16_t period_ms) {
+    if (channel >= PWM_CHANNEL_COUNT || period_ms == 0) return ESP_ERR_INVALID_ARG;
+    pattern_state_t *ps = &s_pattern[channel];
+    pwm_control_stop_pattern(channel);
+    // Remember last non-zero as ON value; if current is zero, default to 255
+    uint8_t cur = s_states[channel];
+    if (cur != 0) ps->on_value = cur;
+    ps->type = PATTERN_BLINK;
+    ps->period_ms = period_ms;
+    ps->phase_on = false; // start from OFF -> next tick goes ON
+    // Immediate off to start
+    apply_value_internal(channel, 0, 0, false, true);
+    // Start periodic toggle every half-period
+    TickType_t half = pdMS_TO_TICKS(period_ms / 2 ? period_ms / 2 : 1);
+    xTimerChangePeriod(ps->timer, half, 0);
+    xTimerStart(ps->timer, 0);
+    return ESP_OK;
+}
+
+esp_err_t pwm_control_start_strobe(uint8_t channel, uint8_t count, uint16_t total_ms, uint16_t pause_ms) {
+    if (channel >= PWM_CHANNEL_COUNT || total_ms == 0 || count == 0) return ESP_ERR_INVALID_ARG;
+    pattern_state_t *ps = &s_pattern[channel];
+    pwm_control_stop_pattern(channel);
+    uint8_t cur = s_states[channel];
+    if (cur != 0) ps->on_value = cur;
+    ps->type = PATTERN_STROBE;
+    ps->pause_ms = pause_ms;
+    ps->remaining_on_pulses = count;
+    ps->initial_pulses = count;
+    ps->in_pause = false;
+    ps->phase_on = false; // start from OFF
+    // Compute period = total_ms / count, ON and OFF duration = period/2 each
+    uint32_t period = total_ms / count;
+    uint32_t half = period / 2;
+    if (half == 0) half = 1; // ensure at least 1ms
+    ps->pulse_dur_ms = (uint16_t)half;
+    // Set OFF initially
+    apply_value_internal(channel, 0, 0, false, true);
+    // Start toggling with pulse duration
+    TickType_t tick = pdMS_TO_TICKS(ps->pulse_dur_ms ? ps->pulse_dur_ms : 1);
+    xTimerChangePeriod(ps->timer, tick, 0);
+    xTimerStart(ps->timer, 0);
+    return ESP_OK;
+}
