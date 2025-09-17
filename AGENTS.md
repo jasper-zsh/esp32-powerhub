@@ -7,12 +7,9 @@ This project use ESP32S3 micro controller with following parts:
 Each channel can work in switch mode and PWM mode.
 In switch mode, high level means ON, hi-res means OFF.
 
-## BLE
-This devices works as a BLE device with 1 service and 2 characterics.
-Detailed design for BLE is in `designs/ble.md`
-
-# Persistence
-States of 4 PWM channels are persisted in NVS Flash, and restored immediately when power on.
+# Documents
+Original demands are in `DEMAND.md`.
+Designs are in `DESIGNS.md`
 
 # References
 Always use context7 when I need code generation, setup or configuration steps, or

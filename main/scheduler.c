@@ -1,0 +1,207 @@
+#include "scheduler.h"
+
+#include "esp_log.h"
+
+#include "freertos/queue.h"
+#include "freertos/task.h"
+
+#include "pwm_control.h"
+#include "storage.h"
+#include "preset_mgr.h"
+#include "command_codec.h"
+#include "nvs.h"
+
+static const char *TAG = "sched";
+
+#define SCHED_QUEUE_LENGTH 16
+typedef enum {
+    SCHED_EVENT_CMD = 0,
+    SCHED_EVENT_EXEC_PRESET,
+} scheduler_event_type_t;
+
+typedef struct {
+    scheduler_event_type_t type;
+    union {
+        control_cmd_t cmd;
+        struct {
+            uint8_t preset_id;
+        } exec_preset;
+    } data;
+} scheduler_event_t;
+
+static QueueHandle_t s_evt_queue = NULL;
+static TaskHandle_t s_sched_task = NULL;
+
+static esp_err_t persist_states(void) {
+    uint8_t states[PWM_CHANNEL_COUNT] = {0};
+    pwm_control_get_states(states);
+    esp_err_t err = storage_write_states(states);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Persist states failed err=%d", err);
+    }
+    return err;
+}
+
+static esp_err_t handle_command_internal(const control_cmd_t *cmd) {
+    if (!cmd) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t validate_rc = control_cmd_validate(cmd);
+    if (validate_rc != ESP_OK) {
+        return validate_rc;
+    }
+    switch (cmd->mode) {
+        case 0x00: { // set value
+            if (cmd->length != 1) return ESP_ERR_INVALID_SIZE;
+            uint8_t value = cmd->payload[0];
+            esp_err_t err = pwm_control_apply(cmd->channel, value, 0);
+            if (err == ESP_OK) {
+                persist_states();
+            }
+            return err;
+        }
+        case 0x01: { // fade
+            if (cmd->length != 3) return ESP_ERR_INVALID_SIZE;
+            uint8_t value = cmd->payload[0];
+            uint16_t duration = ((uint16_t)cmd->payload[1] << 8) | cmd->payload[2];
+            esp_err_t err = pwm_control_apply(cmd->channel, value, duration);
+            if (err == ESP_OK) {
+                persist_states();
+            }
+            return err;
+        }
+        case 0x02: { // blink
+            if (cmd->length != 2) return ESP_ERR_INVALID_SIZE;
+            uint16_t period = ((uint16_t)cmd->payload[0] << 8) | cmd->payload[1];
+            esp_err_t err = pwm_control_start_blink(cmd->channel, period);
+            if (err == ESP_OK) {
+                persist_states();
+            }
+            return err;
+        }
+        case 0x03: { // strobe
+            if (cmd->length != 5) return ESP_ERR_INVALID_SIZE;
+            uint8_t count = cmd->payload[0];
+            uint16_t total = ((uint16_t)cmd->payload[1] << 8) | cmd->payload[2];
+            uint16_t pause = ((uint16_t)cmd->payload[3] << 8) | cmd->payload[4];
+            esp_err_t err = pwm_control_start_strobe(cmd->channel, count, total, pause);
+            if (err == ESP_OK) {
+                persist_states();
+            }
+            return err;
+        }
+        default:
+            ESP_LOGW(TAG, "Unknown mode=0x%02X", cmd->mode);
+            return ESP_ERR_INVALID_ARG;
+    }
+}
+
+static esp_err_t stop_all_channels(void) {
+    esp_err_t first_err = ESP_OK;
+    for (uint8_t ch = 0; ch < PWM_CHANNEL_COUNT; ++ch) {
+        esp_err_t err = pwm_control_apply(ch, 0, 0);
+        if (first_err == ESP_OK && err != ESP_OK) {
+            first_err = err;
+        }
+    }
+    persist_states();
+    return first_err;
+}
+
+static esp_err_t preset_iter_cb(const control_cmd_t *cmd, void *ctx) {
+    (void)ctx;
+    return handle_command_internal(cmd);
+}
+
+static esp_err_t execute_preset(uint8_t preset_id) {
+    if (preset_id == 0) {
+        ESP_LOGI(TAG, "Execute preset 0x00: stop all channels");
+        return stop_all_channels();
+    }
+    esp_err_t err = preset_mgr_iterate_commands(preset_id, preset_iter_cb, NULL);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "Preset %u not found", preset_id);
+        return ESP_ERR_NOT_FOUND;
+    }
+    return err;
+}
+
+static void scheduler_task(void *param) {
+    scheduler_event_t evt;
+    while (true) {
+        if (xQueueReceive(s_evt_queue, &evt, portMAX_DELAY) == pdTRUE) {
+            switch (evt.type) {
+                case SCHED_EVENT_CMD: {
+                    if (evt.data.cmd.channel >= PWM_CHANNEL_COUNT) {
+                        ESP_LOGW(TAG, "Invalid channel %u for mode 0x%02X", evt.data.cmd.channel, evt.data.cmd.mode);
+                        break;
+                    }
+                    esp_err_t err = handle_command_internal(&evt.data.cmd);
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG, "Command mode=0x%02X failed err=%d", evt.data.cmd.mode, err);
+                    }
+                    break;
+                }
+                case SCHED_EVENT_EXEC_PRESET: {
+                    esp_err_t err = execute_preset(evt.data.exec_preset.preset_id);
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG, "Execute preset %u failed err=%d", evt.data.exec_preset.preset_id, err);
+                    }
+                    break;
+                }
+                default:
+                    ESP_LOGW(TAG, "Unknown scheduler event type=%d", evt.type);
+                    break;
+            }
+        }
+    }
+}
+
+esp_err_t scheduler_init(void) {
+    if (s_evt_queue) {
+        return ESP_OK;
+    }
+    s_evt_queue = xQueueCreate(SCHED_QUEUE_LENGTH, sizeof(scheduler_event_t));
+    if (!s_evt_queue) {
+        return ESP_ERR_NO_MEM;
+    }
+    BaseType_t rc = xTaskCreatePinnedToCore(scheduler_task, "sched", 4096, NULL, 5, &s_sched_task, tskNO_AFFINITY);
+    if (rc != pdPASS) {
+        vQueueDelete(s_evt_queue);
+        s_evt_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+esp_err_t scheduler_submit_command(const control_cmd_t *cmd, TickType_t ticks_to_wait) {
+    if (!cmd || !s_evt_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    scheduler_event_t evt = {
+        .type = SCHED_EVENT_CMD,
+        .data.cmd = *cmd,
+    };
+    BaseType_t rc = xQueueSend(s_evt_queue, &evt, ticks_to_wait);
+    if (rc != pdPASS) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+esp_err_t scheduler_execute_preset(uint8_t preset_id, TickType_t ticks_to_wait) {
+    if (!s_evt_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    scheduler_event_t evt = {
+        .type = SCHED_EVENT_EXEC_PRESET,
+        .data.exec_preset = {
+            .preset_id = preset_id,
+        },
+    };
+    BaseType_t rc = xQueueSend(s_evt_queue, &evt, ticks_to_wait);
+    if (rc != pdPASS) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}

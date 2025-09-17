@@ -7,6 +7,8 @@
 #include "pwm_control.h"
 #include "storage.h"
 #include "ble_server.h"
+#include "preset_mgr.h"
+#include "scheduler.h"
 
 static const char *TAG = "app";
 
@@ -25,9 +27,11 @@ void app_main(void) {
     ESP_ERROR_CHECK(storage_read_states(states));
     ESP_ERROR_CHECK(pwm_control_load_and_apply(states));
 
+    ESP_ERROR_CHECK(preset_mgr_init());
+    ESP_ERROR_CHECK(scheduler_init());
+
     // Init BLE GATT server
     ESP_ERROR_CHECK(ble_server_init());
 
     ESP_LOGI(TAG, "System initialized.");
 }
-

@@ -1,5 +1,6 @@
 #include "ble_server.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -14,17 +15,19 @@
 // #include "host/ble_store.h"
 
 #include "pwm_control.h"
-#include "storage.h"
+#include "scheduler.h"
+#include "preset_mgr.h"
+#include "command_codec.h"
 
 static const char *TAG = "ble";
 
-// Custom 128-bit UUIDs (base: 5e0bxxxx-6f72-4761-8e3e-7a1c1b5f9b11)
-// Service UUID: 5e0b0001-6f72-4761-8e3e-7a1c1b5f9b11
-// State (READ) Char: 5e0b0002-6f72-4761-8e3e-7a1c1b5f9b11
-// Control (WRITE) Char: 5e0b0003-6f72-4761-8e3e-7a1c1b5f9b11
+// Custom 128-bit service UUID with 16-bit characteristics per specification
 static const ble_uuid128_t UUID_SERVICE = BLE_UUID128_INIT(0x11,0x9b,0x5f,0x1b,0x1c,0x7a,0x3e,0x8e,0x61,0x47,0x72,0x6f,0x01,0x00,0x0b,0x5e);
-static const ble_uuid128_t UUID_STATE   = BLE_UUID128_INIT(0x11,0x9b,0x5f,0x1b,0x1c,0x7a,0x3e,0x8e,0x61,0x47,0x72,0x6f,0x02,0x00,0x0b,0x5e);
-static const ble_uuid128_t UUID_CONTROL = BLE_UUID128_INIT(0x11,0x9b,0x5f,0x1b,0x1c,0x7a,0x3e,0x8e,0x61,0x47,0x72,0x6f,0x03,0x00,0x0b,0x5e);
+static const ble_uuid16_t UUID_CH_STATE   = BLE_UUID16_INIT(0xFFF0);
+static const ble_uuid16_t UUID_CH_CONTROL = BLE_UUID16_INIT(0xFFF1);
+static const ble_uuid16_t UUID_CH_PRESET_READ  = BLE_UUID16_INIT(0xFFF2);
+static const ble_uuid16_t UUID_CH_PRESET_WRITE = BLE_UUID16_INIT(0xFFF3);
+static const ble_uuid16_t UUID_CH_PRESET_EXEC  = BLE_UUID16_INIT(0xFFF4);
 
 static uint16_t s_state_val_handle;
 
@@ -39,102 +42,138 @@ static int chr_state_access(uint16_t conn_handle, uint16_t attr_handle, struct b
     return BLE_ATT_ERR_READ_NOT_PERMITTED;
 }
 
+typedef struct {
+    struct os_mbuf *om;
+} preset_read_ctx_t;
+
+static esp_err_t preset_read_iter_cb(const uint8_t *entry, size_t len, void *ctx) {
+    preset_read_ctx_t *read_ctx = (preset_read_ctx_t *)ctx;
+    if (len == 0) {
+        return ESP_OK;
+    }
+    return os_mbuf_append(read_ctx->om, entry, len) == 0 ? ESP_OK : ESP_FAIL;
+}
+
+static int chr_preset_read_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_READ_NOT_PERMITTED;
+    }
+    preset_read_ctx_t ctx = {
+        .om = ctxt->om,
+    };
+    esp_err_t err = preset_mgr_for_each_entry(preset_read_iter_cb, &ctx);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Preset read iteration err=%d", err);
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return 0;
+}
+
+static int chr_preset_write_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
+    uint16_t total_len = OS_MBUF_PKTLEN(ctxt->om);
+    if (total_len < 2 || total_len > 512) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    uint8_t *buf = malloc(total_len);
+    if (!buf) {
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    uint16_t copied = 0;
+    int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, total_len, &copied);
+    if (rc != 0 || copied != total_len) {
+        free(buf);
+        ESP_LOGW(TAG, "Preset write flatten rc=%d copied=%u len=%u", rc, copied, total_len);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (buf[0] == 0x00) {
+        free(buf);
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    esp_err_t err = preset_mgr_store(buf, copied);
+    free(buf);
+    if (err == ESP_OK) {
+        return 0;
+    }
+    ESP_LOGW(TAG, "Preset store err=%d", err);
+    if (err == ESP_ERR_INVALID_SIZE || err == ESP_ERR_INVALID_ARG) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
 static int chr_control_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
         return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
     }
 
-    // Variable-length command stream; Big-Endian for multi-byte integers.
-    // Command format(s):
-    // 0x00 SET:   [0x00][ch][value]
-    // 0x01 FADE:  [0x01][ch][value][dur_hi][dur_lo]
-    // 0x02 BLINK: [0x02][ch][period_hi][period_lo]
-    // 0x03 STROBE:[0x03][ch][count][total_hi][total_lo][pause_hi][pause_lo]
-    //   count = 点亮次数 (number of ON pulses)
-    //   period = total/count, ON=period/2, OFF=period/2
-
-    uint8_t buf[128];
+    uint8_t buffer[256];
     uint16_t copied = 0;
-    int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &copied);
-    if (rc != 0 || copied < 2) {
-        ESP_LOGW(TAG, "Invalid write len=%u rc=%d", (unsigned)copied, rc);
+    int rc = ble_hs_mbuf_to_flat(ctxt->om, buffer, sizeof(buffer), &copied);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Control write flatten rc=%d", rc);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (copied < 2) {
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
 
-    bool need_persist = false;
-    uint16_t idx = 0;
-    while (idx < copied) {
-        uint8_t mode = buf[idx++];
-        if (idx >= copied) {
-            ESP_LOGW(TAG, "Truncated after mode=0x%02X", mode);
-            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-        }
-        uint8_t ch = buf[idx++];
-        if (ch >= PWM_CHANNEL_COUNT) {
-            ESP_LOGW(TAG, "Invalid channel=%u", ch);
-            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-        }
-        esp_err_t err = ESP_OK;
-        switch (mode) {
-            case 0x00: { // SET
-                if (idx + 1 > copied) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-                uint8_t value = buf[idx++];
-                ESP_LOGI(TAG, "SET ch=%u val=%u", ch, value);
-                err = pwm_control_apply(ch, value, 0);
-                need_persist = true;
-                break;
-            }
-            case 0x01: { // FADE
-                if (idx + 3 > copied) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-                uint8_t value = buf[idx++];
-                uint16_t dur = ((uint16_t)buf[idx] << 8) | (uint16_t)buf[idx+1];
-                idx += 2;
-                ESP_LOGI(TAG, "FADE ch=%u val=%u dur_ms=%u", ch, value, (unsigned)dur);
-                err = pwm_control_apply(ch, value, dur);
-                need_persist = true;
-                break;
-            }
-            case 0x02: { // BLINK
-                if (idx + 2 > copied) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-                uint16_t period = ((uint16_t)buf[idx] << 8) | (uint16_t)buf[idx+1];
-                idx += 2;
-                ESP_LOGI(TAG, "BLINK ch=%u period_ms=%u", ch, (unsigned)period);
-                err = pwm_control_start_blink(ch, period);
-                break;
-            }
-            case 0x03: { // STROBE
-                if (idx + 5 > copied) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-                uint8_t count = buf[idx++];
-                uint16_t total = ((uint16_t)buf[idx] << 8) | (uint16_t)buf[idx+1];
-                idx += 2;
-                uint16_t pause = ((uint16_t)buf[idx] << 8) | (uint16_t)buf[idx+1];
-                idx += 2;
-                ESP_LOGI(TAG, "STROBE ch=%u count=%u total_ms=%u pause_ms=%u", ch, count, (unsigned)total, (unsigned)pause);
-                err = pwm_control_start_strobe(ch, count, total, pause);
-                break;
-            }
-            default:
-                ESP_LOGW(TAG, "Unknown mode=0x%02X", mode);
-                return BLE_ATT_ERR_UNLIKELY;
-        }
+    size_t offset = 0;
+    while (offset < copied) {
+        control_cmd_t cmd = {0};
+        size_t consumed = 0;
+        esp_err_t err = control_cmd_parse(buffer + offset, copied - offset, &consumed, &cmd);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Op failed mode=0x%02X ch=%u err=%d", mode, ch, err);
-            return BLE_ATT_ERR_UNLIKELY;
+            ESP_LOGW(TAG, "Parse failed at offset=%zu err=%d", offset, err);
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
-    }
-
-    if (need_persist) {
-        uint8_t states[4];
-        pwm_control_get_states(states);
-        esp_err_t nvs_rc = storage_write_states(states);
-        if (nvs_rc != ESP_OK) {
-            ESP_LOGW(TAG, "NVS persist failed rc=%d", nvs_rc);
-        } else {
-            ESP_LOGI(TAG, "State persisted: [%u,%u,%u,%u]",
-                    states[0], states[1], states[2], states[3]);
+        err = control_cmd_validate(&cmd);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Validate failed mode=0x%02X ch=%u err=%d", cmd.mode, cmd.channel, err);
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
+        err = scheduler_submit_command(&cmd, pdMS_TO_TICKS(200));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Scheduler busy mode=0x%02X err=%d", cmd.mode, err);
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        offset += consumed;
     }
     return 0;
+}
+
+static int chr_preset_exec_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
+    uint16_t total_len = OS_MBUF_PKTLEN(ctxt->om);
+    if (total_len != 1) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    uint8_t preset_id = 0;
+    uint16_t copied = 0;
+    int rc = ble_hs_mbuf_to_flat(ctxt->om, &preset_id, sizeof(preset_id), &copied);
+    if (rc != 0 || copied != 1) {
+        ESP_LOGW(TAG, "Preset exec flatten rc=%d copied=%u", rc, copied);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    esp_err_t err = scheduler_execute_preset(preset_id, pdMS_TO_TICKS(200));
+    if (err == ESP_OK) {
+        return 0;
+    }
+    if (err == ESP_ERR_TIMEOUT) {
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    if (err == ESP_ERR_NOT_FOUND) {
+        return BLE_ATT_ERR_ATTR_NOT_FOUND;
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    ESP_LOGW(TAG, "Preset exec err=%d", err);
+    return BLE_ATT_ERR_UNLIKELY;
 }
 
 static const struct ble_gatt_svc_def gatt_svcs[] = {
@@ -143,15 +182,30 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
         .uuid = &UUID_SERVICE.u,
         .characteristics = (struct ble_gatt_chr_def[]) {
             {
-                .uuid = &UUID_STATE.u,
+                .uuid = &UUID_CH_STATE.u,
                 .access_cb = chr_state_access,
                 .flags = BLE_GATT_CHR_F_READ,
                 .val_handle = &s_state_val_handle,
             },
             {
-                .uuid = &UUID_CONTROL.u,
+                .uuid = &UUID_CH_CONTROL.u,
                 .access_cb = chr_control_access,
-                .flags = BLE_GATT_CHR_F_WRITE,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                .uuid = &UUID_CH_PRESET_READ.u,
+                .access_cb = chr_preset_read_access,
+                .flags = BLE_GATT_CHR_F_READ,
+            },
+            {
+                .uuid = &UUID_CH_PRESET_WRITE.u,
+                .access_cb = chr_preset_write_access,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                .uuid = &UUID_CH_PRESET_EXEC.u,
+                .access_cb = chr_preset_exec_access,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             { 0 }
         },
