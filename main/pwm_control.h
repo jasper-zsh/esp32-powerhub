@@ -42,8 +42,7 @@ esp_err_t pwm_control_stop_pattern(uint8_t channel);
 // period_ms is the total on+off cycle period.
 esp_err_t pwm_control_start_blink(uint8_t channel, uint16_t period_ms);
 
-// Start strobe burst: flashes 'count' times within total duration dur_ms.
-// The flash period is dur_ms/count, and ON/OFF are 50% duty each (period/2).
+// Start strobe burst: flashes 'count' times within total duration dur_ms (50% duty per pulse).
 // After a burst, if pause_ms > 0, stays off for pause_ms then repeats; if pause_ms == 0, stops and turns off.
 esp_err_t pwm_control_start_strobe(uint8_t channel, uint8_t count, uint16_t dur_ms, uint16_t pause_ms);
 

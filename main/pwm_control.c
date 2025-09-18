@@ -51,7 +51,7 @@ typedef struct {
 static pattern_state_t s_pattern[PWM_CHANNEL_COUNT] = {0};
 
 // Forward declarations for helpers used in timer callback
-static void set_gpio_highz(int idx);
+static void set_gpio_low(int idx);
 static void set_gpio_high(int idx);
 // Forward declaration: internal apply that can skip canceling pattern
 static esp_err_t apply_value_internal(uint8_t channel, uint8_t value, uint16_t duration_ms, bool cancel_pattern, bool silent);
@@ -63,7 +63,7 @@ static void pwm_defer_timer_cb(TimerHandle_t xTimer) {
     if (ch < 0 || ch >= PWM_CHANNEL_COUNT) return;
     uint8_t v = s_states[ch];
     if (v == 0) {
-        set_gpio_highz(ch);
+        set_gpio_low(ch);
     } else if (v == 255) {
         set_gpio_high(ch);
     }
@@ -140,36 +140,15 @@ static esp_err_t restart_defer_timer(uint8_t channel, uint32_t delay_ms) {
 }
 
 // Helper: attach LEDC to a channel's GPIO if not already
-static esp_err_t attach_ledc_channel(int idx) {
-    ledc_channel_config_t ch = {
-        .gpio_num = s_gpio[idx],
-        .speed_mode = s_mode,
-        .channel = s_ledc_ch[idx],
-        .intr_type = LEDC_INTR_DISABLE,
-        .timer_sel = s_timer,
-        .duty = 0,
-        .hpoint = 0,
-        .flags = { .output_invert = 0 },
-    };
-    return ledc_channel_config(&ch);
+// Helper: drive channel using LEDC duty only
+static void set_gpio_low(int idx) {
+    (void) ledc_set_duty(s_mode, s_ledc_ch[idx], 0);
+    (void) ledc_update_duty(s_mode, s_ledc_ch[idx]);
 }
 
-// Helper: detach LEDC and set GPIO to input (High-Z)
-static void set_gpio_highz(int idx) {
-    // Stop LEDC driving this channel
-    ledc_stop(s_mode, s_ledc_ch[idx], 0 /* idle level low (ignored when we switch to input) */);
-    gpio_reset_pin(s_gpio[idx]);
-    gpio_set_direction(s_gpio[idx], GPIO_MODE_INPUT);
-    gpio_set_pull_mode(s_gpio[idx], GPIO_FLOATING);
-}
-
-// Helper: set GPIO high (switch mode ON)
 static void set_gpio_high(int idx) {
-    // Ensure LEDC is not driving; set direct GPIO high
-    ledc_stop(s_mode, s_ledc_ch[idx], 1 /* idle high */);
-    gpio_reset_pin(s_gpio[idx]);
-    gpio_set_direction(s_gpio[idx], GPIO_MODE_OUTPUT);
-    gpio_set_level(s_gpio[idx], 1);
+    (void) ledc_set_duty(s_mode, s_ledc_ch[idx], s_duty_max);
+    (void) ledc_update_duty(s_mode, s_ledc_ch[idx]);
 }
 
 esp_err_t pwm_control_init(void) {
@@ -196,7 +175,21 @@ esp_err_t pwm_control_init(void) {
 
     for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
         s_states[i] = 0;
-        set_gpio_highz(i);
+        ledc_channel_config_t ch = {
+            .gpio_num = s_gpio[i],
+            .speed_mode = s_mode,
+            .channel = s_ledc_ch[i],
+            .intr_type = LEDC_INTR_DISABLE,
+            .timer_sel = s_timer,
+            .duty = 0,
+            .hpoint = 0,
+            .flags = { .output_invert = 0 },
+        };
+        err = ledc_channel_config(&ch);
+        if (err != ESP_OK) {
+            return err;
+        }
+        set_gpio_low(i);
         s_defer_timers[i] = xTimerCreate("pwmDefer", pdMS_TO_TICKS(10), pdFALSE, (void *)(intptr_t)i, pwm_defer_timer_cb);
         if (!s_defer_timers[i]) {
             return ESP_ERR_NO_MEM;
@@ -226,22 +219,20 @@ static esp_err_t apply_value_internal(uint8_t channel, uint8_t value, uint16_t d
     // Map 0..255 to high-resolution duty 0..s_duty_max
     uint32_t duty_target = (uint32_t)value * s_duty_max / 255U;
 
-    // 0 -> High-Z
+    // 0 -> drive low (0% duty)
     if (value == 0) {
         if (duration_ms > 0) {
-            esp_err_t err = attach_ledc_channel(channel);
-            if (err != ESP_OK) return err;
-            err = ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], 0, duration_ms);
+            esp_err_t err = ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], 0, duration_ms);
             if (err != ESP_OK) return err;
             err = ledc_fade_start(s_mode, s_ledc_ch[channel], LEDC_FADE_NO_WAIT);
             if (err != ESP_OK) return err;
             uint32_t delay_ms = duration_ms + 5U;
             err = restart_defer_timer(channel, delay_ms);
             if (err != ESP_OK) return err;
-            if (!silent) ESP_LOGI(TAG, "ch=%u fade->0 for %u ms, then High-Z", channel, (unsigned)duration_ms);
+            if (!silent) ESP_LOGI(TAG, "ch=%u fade->0 for %u ms, then drive low", channel, (unsigned)duration_ms);
         } else {
-            set_gpio_highz(channel);
-            if (!silent) ESP_LOGI(TAG, "ch=%u set High-Z immediately", channel);
+            set_gpio_low(channel);
+            if (!silent) ESP_LOGI(TAG, "ch=%u set low immediately", channel);
         }
         return ESP_OK;
     }
@@ -249,26 +240,23 @@ static esp_err_t apply_value_internal(uint8_t channel, uint8_t value, uint16_t d
     // 255 -> constant high
     if (value == 255) {
         if (duration_ms > 0) {
-            esp_err_t err = attach_ledc_channel(channel);
-            if (err != ESP_OK) return err;
-            err = ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], s_duty_max, duration_ms);
+            esp_err_t err = ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], s_duty_max, duration_ms);
             if (err != ESP_OK) return err;
             err = ledc_fade_start(s_mode, s_ledc_ch[channel], LEDC_FADE_NO_WAIT);
             if (err != ESP_OK) return err;
             uint32_t delay_ms = duration_ms + 5U;
             err = restart_defer_timer(channel, delay_ms);
             if (err != ESP_OK) return err;
-            if (!silent) ESP_LOGI(TAG, "ch=%u fade->255 for %u ms, then GPIO High", channel, (unsigned)duration_ms);
+            if (!silent) ESP_LOGI(TAG, "ch=%u fade->255 for %u ms", channel, (unsigned)duration_ms);
         } else {
             set_gpio_high(channel);
-            if (!silent) ESP_LOGI(TAG, "ch=%u set GPIO High immediately", channel);
+            if (!silent) ESP_LOGI(TAG, "ch=%u set 100%% duty immediately", channel);
         }
         return ESP_OK;
     }
 
     // 1..254 -> PWM
-    esp_err_t err = attach_ledc_channel(channel);
-    if (err != ESP_OK) return err;
+    esp_err_t err;
     if (duration_ms > 0) {
         err = ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], duty_target, duration_ms);
         if (err != ESP_OK) return err;
@@ -350,11 +338,13 @@ esp_err_t pwm_control_start_strobe(uint8_t channel, uint8_t count, uint16_t tota
     ps->phase_on = false; // start from OFF
     // Compute period = total_ms / count, ON and OFF duration = period/2 each
     uint32_t period = total_ms / count;
+    if (period == 0) period = 1; // ensure at least 1ms
     uint32_t half = period / 2;
-    if (half == 0) half = 1; // ensure at least 1ms
+    if (half == 0) half = 1;
     ps->pulse_dur_ms = (uint16_t)half;
     // Set OFF initially
     apply_value_internal(channel, 0, 0, false, true);
+    ESP_LOGI(TAG, "strobe start ch=%u count=%u total=%u pause=%u", channel, (unsigned)count, (unsigned)total_ms, (unsigned)pause_ms);
     // Start toggling with pulse duration
     TickType_t tick = pdMS_TO_TICKS(ps->pulse_dur_ms ? ps->pulse_dur_ms : 1);
     xTimerChangePeriod(ps->timer, tick, 0);
