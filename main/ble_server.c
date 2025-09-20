@@ -18,6 +18,7 @@
 #include "scheduler.h"
 #include "preset_mgr.h"
 #include "command_codec.h"
+#include "led_status.h"
 
 static const char *TAG = "ble";
 
@@ -235,12 +236,14 @@ static void start_advertise(void) {
     if (rc_stop != 0) {
         ESP_LOGI(TAG, "adv_stop rc=%d (ignore if not active)", rc_stop);
     }
+    led_status_set_bluetooth_advertising(false);
 
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "adv set fields rc=%d", rc);
+        led_status_set_error(true);
         return;
     }
 
@@ -283,6 +286,7 @@ static void start_advertise(void) {
     rc = ble_gap_adv_rsp_set_fields(&rsp);
     if (rc != 0) {
         ESP_LOGE(TAG, "adv rsp set fields rc=%d", rc);
+        led_status_set_error(true);
         return;
     }
 
@@ -294,8 +298,12 @@ static void start_advertise(void) {
     rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &advp, gap_event_cb, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "adv start rc=%d", rc);
+        led_status_set_bluetooth_advertising(false);
+        led_status_set_error(true);
     } else {
         ESP_LOGI(TAG, "Advertising started");
+        led_status_set_bluetooth_advertising(true);
+        led_status_set_error(false);
     }
 }
 
@@ -314,6 +322,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             }
         }
         if (event->connect.status == 0) {
+            led_status_set_bluetooth_connected(true);
+            led_status_set_bluetooth_advertising(false);
+            led_status_set_error(false);
             return 0;
         }
         // restart advertising on failed connect
@@ -321,10 +332,12 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "GAP disconnect reason=%d; restart advertising", event->disconnect.reason);
+        led_status_set_bluetooth_connected(false);
         start_advertise();
         return 0;
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGI(TAG, "Advertising complete reason=%d, restarting", event->adv_complete.reason);
+        led_status_set_bluetooth_advertising(false);
         start_advertise();
         return 0;
     case BLE_GAP_EVENT_MTU:
@@ -359,6 +372,8 @@ esp_err_t ble_server_init(void) {
     int rc = nimble_port_init();
     if (rc != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init rc=%d", rc);
+        // 设置LED错误状态
+        led_status_set_error(true);
         return ESP_FAIL;
     }
 
@@ -374,9 +389,19 @@ esp_err_t ble_server_init(void) {
 
     // Add services
     rc = ble_gatts_count_cfg(gatt_svcs);
-    if (rc != 0) return ESP_FAIL;
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gatts_count_cfg rc=%d", rc);
+        // 设置LED错误状态
+        led_status_set_error(true);
+        return ESP_FAIL;
+    }
     rc = ble_gatts_add_svcs(gatt_svcs);
-    if (rc != 0) return ESP_FAIL;
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gatts_add_svcs rc=%d", rc);
+        // 设置LED错误状态
+        led_status_set_error(true);
+        return ESP_FAIL;
+    }
 
     // ble_store_config_init();
 
