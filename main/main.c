@@ -9,6 +9,7 @@
 #include "ble_server.h"
 #include "preset_mgr.h"
 #include "scheduler.h"
+#include "led_status.h"
 
 static const char *TAG = "app";
 
@@ -29,6 +30,13 @@ void app_main(void) {
 
     ESP_ERROR_CHECK(preset_mgr_init());
     ESP_ERROR_CHECK(scheduler_init());
+
+    // Init LED status module
+    ESP_ERROR_CHECK(led_status_init());
+    
+    // Set initial state to indicate system is starting
+    led_status_set_bluetooth_connected(false);
+    led_status_set_error(false);
 
     // Init BLE GATT server
     ESP_ERROR_CHECK(ble_server_init());
