@@ -3,6 +3,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "driver/rmt.h"
 
 #include "pwm_control.h"
 #include "storage.h"
@@ -10,6 +11,7 @@
 #include "preset_mgr.h"
 #include "scheduler.h"
 #include "led_status.h"
+#include "led_rgb.h"
 
 static const char *TAG = "app";
 
@@ -21,6 +23,12 @@ void app_main(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // Initialize RGB LED
+    ESP_ERROR_CHECK(led_rgb_init());
+    
+    // Set initial LED status (system starting)
+    ESP_ERROR_CHECK(led_rgb_set_status(false, false));
 
     // Initialize PWM and load persisted states
     ESP_ERROR_CHECK(pwm_control_init());
