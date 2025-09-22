@@ -10,6 +10,18 @@ In switch mode, high level means ON, hi-res means OFF.
 ## WS2812 RGB LED
 Connected on GPIO21.
 
+## 电源电压探针
+GPIO2上连接了一个分压电阻，使用ADC读取可以获得电源电压
+
+## Temperature sensor DS18B20
+GND connected to GPIO13
+DQ connected to GPIO12
+VDD connected to GPIO11
+
+Use GPIO to drive the IC directly.
+When enabled, GPIO13 set to LOW, GPIO11 set to HIGH.
+When disabled, GPIO11~13 are all set to High-Z.
+
 # Documents
 Documents are divided into multiple folders in `versions` folder, like `versions/001.init`.
 In every document folder, there're two main file:

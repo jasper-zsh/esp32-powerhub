@@ -2,7 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include "esp_log.h"
+#include "esp_check.h"
 #include "nvs_flash.h"
 
 #include "nimble/nimble_port.h"
@@ -19,8 +19,14 @@
 #include "preset_mgr.h"
 #include "command_codec.h"
 #include "led_status.h"
+#include "power_mgr.h"
 
 static const char *TAG = "ble";
+
+static int chr_power_mgmt_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    return power_mgr_ble_access(conn_handle, attr_handle, ctxt);
+}
+
 
 // Custom 128-bit service UUID with 16-bit characteristics per specification
 static const ble_uuid128_t UUID_SERVICE = BLE_UUID128_INIT(0x11,0x9b,0x5f,0x1b,0x1c,0x7a,0x3e,0x8e,0x61,0x47,0x72,0x6f,0x01,0x00,0x0b,0x5e);
@@ -29,6 +35,7 @@ static const ble_uuid16_t UUID_CH_CONTROL = BLE_UUID16_INIT(0xFFF1);
 static const ble_uuid16_t UUID_CH_PRESET_READ  = BLE_UUID16_INIT(0xFFF2);
 static const ble_uuid16_t UUID_CH_PRESET_WRITE = BLE_UUID16_INIT(0xFFF3);
 static const ble_uuid16_t UUID_CH_PRESET_EXEC  = BLE_UUID16_INIT(0xFFF4);
+static const ble_uuid16_t UUID_CH_POWER_MGMT   = BLE_UUID16_INIT(0xFFF5);
 
 static uint16_t s_state_val_handle;
 
@@ -207,6 +214,11 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
                 .uuid = &UUID_CH_PRESET_EXEC.u,
                 .access_cb = chr_preset_exec_access,
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                .uuid = &UUID_CH_POWER_MGMT.u,
+                .access_cb = chr_power_mgmt_access,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             { 0 }
         },

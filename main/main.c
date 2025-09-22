@@ -11,7 +11,7 @@
 #include "preset_mgr.h"
 #include "scheduler.h"
 #include "led_status.h"
-#include "led_rgb.h"
+#include "power_mgr.h"
 
 static const char *TAG = "app";
 
@@ -28,11 +28,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "NVS initialized");
 
     // Initialize RGB LED (handled in led_status_init)
-    ESP_LOGI(TAG, "RGB LED initialized");
-    
-    // Set initial LED status (system starting)
-    // ESP_ERROR_CHECK(led_rgb_set_status(false, false));
-    // ESP_LOGI(TAG, "Initial LED status set");
+    ESP_ERROR_CHECK(power_mgr_init());
 
     // Init LED status module
     ESP_ERROR_CHECK(led_status_init());
@@ -67,6 +63,8 @@ void app_main(void) {
     } else {
         ESP_LOGI(TAG, "BLE server initialized");
     }
+
+    xTaskCreate(power_mgr_task, "power_mgr", 3072, NULL, 8, NULL);
 
     ESP_LOGI(TAG, "System initialized.");
 }
