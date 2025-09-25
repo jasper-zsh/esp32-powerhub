@@ -16,6 +16,8 @@
 #include "led_status.h"
 #include "pwm_control.h"
 #include "storage.h"
+#include "temp_mgr.h"
+#include "scheduler.h"
 
 #include "ulp_power.h"
 #include "ulp_riscv.h"
@@ -31,15 +33,34 @@ static const char *TAG = "power_mgr";
 #define KEY_SLEEP "sleep_mv"
 #define KEY_WAKE  "wake_mv"
 #define KEY_CAL   "cal_off"
+#define KEY_T_HI  "t_hi"
+#define KEY_T_REC "t_rec"
 
 #define DEFAULT_SLEEP_MV 12500
 #define DEFAULT_WAKE_MV  13200
+#define DEFAULT_TEMP_HI  6000   // 60.00°C
+#define DEFAULT_TEMP_REC 5500   // 55.00°C
 
 #define SAMPLE_INTERVAL_MS 1000
+#define TEMP_DEBOUNCE_COUNT 3
 
 static uint16_t s_sleep_mv = DEFAULT_SLEEP_MV;
 static uint16_t s_wake_mv  = DEFAULT_WAKE_MV;
 static int16_t s_cal_off_mv = 0;
+
+// 温度相关变量
+static int16_t s_temp_hi = DEFAULT_TEMP_HI;
+static int16_t s_temp_rec = DEFAULT_TEMP_REC;
+static int16_t s_latest_temp = 0;
+static bool s_temp_valid = false;
+static bool s_thermal_protection = false;
+static int s_hot_debounce_count = 0;
+static int s_cool_debounce_count = 0;
+
+// BLE通知相关
+static bool s_ble_notifications_enabled = false;
+static uint16_t s_ble_conn_handle = 0;
+static uint16_t s_ble_attr_handle = 0;
 
 static esp_err_t nvs_load_thresholds(void) {
     nvs_handle_t h;
@@ -48,6 +69,15 @@ static esp_err_t nvs_load_thresholds(void) {
     uint16_t v;
     if (nvs_get_u16(h, KEY_SLEEP, &v) == ESP_OK) s_sleep_mv = v;
     if (nvs_get_u16(h, KEY_WAKE,  &v) == ESP_OK) s_wake_mv  = v;
+    
+    // 加载温度阈值
+    int16_t temp_val;
+    if (nvs_get_i16(h, KEY_T_HI, &temp_val) == ESP_OK) {
+        s_temp_hi = temp_val;
+    }
+    if (nvs_get_i16(h, KEY_T_REC, &temp_val) == ESP_OK) {
+        s_temp_rec = temp_val;
+    }
     nvs_close(h);
     return ESP_OK;
 }
@@ -58,12 +88,12 @@ static esp_err_t nvs_store_thresholds(void) {
     ESP_RETURN_ON_ERROR(nvs_set_u16(h, KEY_SLEEP, s_sleep_mv), TAG, "set sleep");
     ESP_RETURN_ON_ERROR(nvs_set_u16(h, KEY_WAKE,  s_wake_mv),  TAG, "set wake");
     ESP_RETURN_ON_ERROR(nvs_set_blob(h, KEY_CAL, &s_cal_off_mv, sizeof(s_cal_off_mv)), TAG, "set cal");
+    ESP_RETURN_ON_ERROR(nvs_set_i16(h, KEY_T_HI, s_temp_hi), TAG, "set temp_hi");
+    ESP_RETURN_ON_ERROR(nvs_set_i16(h, KEY_T_REC, s_temp_rec), TAG, "set temp_rec");
     ESP_RETURN_ON_ERROR(nvs_commit(h), TAG, "commit");
     nvs_close(h);
     return ESP_OK;
 }
-
-#define SAMPLE_INTERVAL_MS 1000
 
 static uint16_t ulp_get_voltage_mv(void) { return ulp_last_mv & 0xFFFF; }
 
@@ -115,14 +145,75 @@ esp_err_t power_mgr_init(void) {
     }
     led_status_enable(true);
     led_status_set_low_battery(false);
+    
+    // 初始化温度管理器
+    esp_err_t temp_err = temp_mgr_init();
+    if (temp_err != ESP_OK) {
+        ESP_LOGW(TAG, "Temperature manager init failed: %s", esp_err_to_name(temp_err));
+    }
+    
     return ESP_OK;
+}
+
+static void thermal_protection_trigger(void) {
+    if (s_thermal_protection) {
+        return; // 已经在热保护状态
+    }
+    
+    ESP_LOGW(TAG, "Thermal protection triggered, temperature: %d.%02d°C", 
+             s_latest_temp / 100, abs(s_latest_temp % 100));
+    
+    s_thermal_protection = true;
+    
+    // 保存所有通道的快照并关闭
+    for (uint8_t ch = 0; ch < PWM_CHANNEL_COUNT; ch++) {
+        control_cmd_t snapshot;
+        esp_err_t err = scheduler_get_channel_snapshot(ch, &snapshot);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to get snapshot for channel %u", ch);
+        }
+        
+        // 关闭通道
+        pwm_control_stop_pattern(ch);
+        pwm_control_apply(ch, 0, 0);
+    }
+    
+    ESP_LOGI(TAG, "All channels shut down for thermal protection");
+}
+
+static void thermal_protection_recovery(void) {
+    if (!s_thermal_protection) {
+        return; // 不在热保护状态
+    }
+    
+    ESP_LOGI(TAG, "Thermal protection recovery, temperature: %d.%02d°C", 
+             s_latest_temp / 100, abs(s_latest_temp % 100));
+    
+    s_thermal_protection = false;
+    
+    // 恢复所有通道的快照
+    for (uint8_t ch = 0; ch < PWM_CHANNEL_COUNT; ch++) {
+        control_cmd_t snapshot;
+        esp_err_t err = scheduler_get_channel_snapshot(ch, &snapshot);
+        if (err == ESP_OK) {
+            err = scheduler_restore_channel_snapshot(ch, &snapshot);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to restore channel %u: %s", ch, esp_err_to_name(err));
+            }
+        }
+    }
+    
+    ESP_LOGI(TAG, "All channels restored from thermal protection");
 }
 
 void power_mgr_task(void *arg) {
     TickType_t last = xTaskGetTickCount();
     static int low_cnt = 0;
+    
     while (1) {
         vTaskDelayUntil(&last, pdMS_TO_TICKS(SAMPLE_INTERVAL_MS));
+        
+        // 电压管理
         uint16_t vin_mv = ulp_get_voltage_mv();
         led_status_set_low_battery(vin_mv < s_sleep_mv);
         if (vin_mv < s_sleep_mv) {
@@ -132,6 +223,65 @@ void power_mgr_task(void *arg) {
             }
         } else {
             low_cnt = 0;
+        }
+        
+        // 温度管理
+        int16_t temp;
+        esp_err_t temp_err = temp_mgr_sample_once(&temp);
+        if (temp_err == ESP_OK) {
+            s_latest_temp = temp;
+            s_temp_valid = true;
+            
+            // 热保护状态机
+            if (!s_thermal_protection) {
+                // 检查是否超温
+                if (temp >= s_temp_hi) {
+                    s_hot_debounce_count++;
+                    s_cool_debounce_count = 0;
+                    if (s_hot_debounce_count >= TEMP_DEBOUNCE_COUNT) {
+                        thermal_protection_trigger();
+                    }
+                } else {
+                    s_hot_debounce_count = 0;
+                }
+            } else {
+                // 检查是否可以恢复
+                if (temp <= s_temp_rec) {
+                    s_cool_debounce_count++;
+                    s_hot_debounce_count = 0;
+                    if (s_cool_debounce_count >= TEMP_DEBOUNCE_COUNT) {
+                        thermal_protection_recovery();
+                    }
+                } else {
+                    s_cool_debounce_count = 0;
+                }
+            }
+        } else {
+            if (temp_err != ESP_OK) {
+                ESP_LOGD(TAG, "Temperature sampling failed: %s", esp_err_to_name(temp_err));
+            }
+        }
+        
+        // BLE通知
+        if (s_ble_notifications_enabled && s_ble_conn_handle != 0) {
+            uint8_t notify_data[8];
+            // 电压（mV）
+            notify_data[0] = (vin_mv >> 8) & 0xFF;
+            notify_data[1] = vin_mv & 0xFF;
+            // 温度（0.01°C）
+            notify_data[2] = (s_latest_temp >> 8) & 0xFF;
+            notify_data[3] = s_latest_temp & 0xFF;
+            // 高温阈值
+            notify_data[4] = (s_temp_hi >> 8) & 0xFF;
+            notify_data[5] = s_temp_hi & 0xFF;
+            // 恢复阈值
+            notify_data[6] = (s_temp_rec >> 8) & 0xFF;
+            notify_data[7] = s_temp_rec & 0xFF;
+            
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(notify_data, sizeof(notify_data));
+            if (om != NULL) {
+                ble_gattc_notify_custom(s_ble_conn_handle, s_ble_attr_handle, om);
+            }
         }
     }
 }
@@ -167,6 +317,15 @@ esp_err_t power_mgr_force_sleep(void) {
     (void)led_status_set_bluetooth_connected(false);
     (void)led_status_set_low_battery(false);
     (void)led_status_enable(false);
+    
+    // 关闭温度传感器
+    temp_mgr_deinit();
+    
+    // 清理热保护状态
+    s_thermal_protection = false;
+    s_hot_debounce_count = 0;
+    s_cool_debounce_count = 0;
+    
     ulp_wake_flag = 0;
     ulp_ok_cnt = 0;
     ulp_min_sleep_ticks = 15;
@@ -179,40 +338,163 @@ esp_err_t power_mgr_force_sleep(void) {
 }
 
 int power_mgr_ble_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt) {
+    // 保存连接信息用于通知
+    s_ble_conn_handle = conn;
+    s_ble_attr_handle = attr;
+    
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        // v004: 返回12字节的扩展状态
+        uint8_t response[12];
+        
+        // uint16 电压（mV）
         uint16_t vin_mv;
         power_mgr_get_voltage_mv(&vin_mv, false);
-        power_mgr_get_voltage_mv(&vin_mv, false);
-        uint16_t buf[3] = { __builtin_bswap16(vin_mv), __builtin_bswap16(s_sleep_mv), __builtin_bswap16(s_wake_mv) };
-        return os_mbuf_append(ctxt->om, buf, sizeof(buf)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        response[0] = (vin_mv >> 8) & 0xFF;
+        response[1] = vin_mv & 0xFF;
+        
+        // int16 温度（0.01°C）
+        response[2] = (s_latest_temp >> 8) & 0xFF;
+        response[3] = s_latest_temp & 0xFF;
+        
+        // int16 高温阈值（0.01°C）
+        response[4] = (s_temp_hi >> 8) & 0xFF;
+        response[5] = s_temp_hi & 0xFF;
+        
+        // int16 恢复阈值（0.01°C）
+        response[6] = (s_temp_rec >> 8) & 0xFF;
+        response[7] = s_temp_rec & 0xFF;
+        
+        // uint8 状态标志
+        uint8_t status_flags = 0;
+        if (s_thermal_protection) status_flags |= 0x01;  // bit0: 热保护中
+        if (s_temp_valid) status_flags |= 0x02;          // bit1: 最近一次温度有效
+        // bit2: 保留
+        // bit3: 处于深睡策略中（总是0，因为我们在运行）
+        response[8] = status_flags;
+        
+        // uint8 保留
+        response[9] = 0;
+        
+        // 保留字节
+        response[10] = 0;
+        response[11] = 0;
+        
+        return os_mbuf_append(ctxt->om, response, sizeof(response)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
+    
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         uint8_t data[3] = {0};
         uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
         if (len != 3) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         uint16_t copied = 0;
         if (ble_hs_mbuf_to_flat(ctxt->om, data, sizeof(data), &copied) != 0 || copied != 3) return BLE_ATT_ERR_UNLIKELY;
+        
         uint8_t cmd = data[0];
-        uint16_t param = (data[1] << 8) | data[2];
+        int16_t param = (int16_t)((data[1] << 8) | data[2]);
         esp_err_t err = ESP_OK;
+        
         switch (cmd) {
-            case 0x01: err = power_mgr_set_thresholds(param, s_wake_mv); break;
-            case 0x02: err = power_mgr_set_thresholds(s_sleep_mv, param); break;
+            // 原有命令（兼容）
+            case 0x01: err = power_mgr_set_thresholds((uint16_t)param, s_wake_mv); break;
+            case 0x02: err = power_mgr_set_thresholds(s_sleep_mv, (uint16_t)param); break;
             case 0x03: err = power_mgr_force_sleep(); break;
-            case 0x04: err = ESP_OK; break;
-            case 0x05: err = power_mgr_set_cal_offset_mv((int16_t)param); break;
-            case 0x06: {
-                uint16_t measured;
-                power_mgr_get_voltage_mv(&measured, false);
-                int32_t off = (int32_t)param - (int32_t)measured;
-                if (off < -2000) off = -2000;
-                if (off >  2000) off =  2000;
-                err = power_mgr_set_cal_offset_mv((int16_t)off);
+            case 0x04: err = ESP_OK; break; // 强制唤醒（无操作）
+            
+            // v004新增命令
+            case 0x11: // 设置高温阈值
+                s_temp_hi = param;
+                err = nvs_store_thresholds();
                 break;
-            }
-            default: return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
+                
+            case 0x12: // 设置恢复阈值
+                s_temp_rec = param;
+                err = nvs_store_thresholds();
+                break;
+                
+            default: 
+                return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
         }
+        
         return err == ESP_OK ? 0 : BLE_ATT_ERR_UNLIKELY;
     }
+
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_DSC) {
+        return 0;
+    }
+
     return BLE_ATT_ERR_UNLIKELY;
+}
+
+void power_mgr_ble_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool enabled) {
+    if (enabled) {
+        s_ble_notifications_enabled = true;
+        s_ble_conn_handle = conn_handle;
+        s_ble_attr_handle = attr_handle;
+        ESP_LOGI(TAG, "BLE notifications enabled (conn=%u attr=%u)", conn_handle, attr_handle);
+        return;
+    }
+
+    s_ble_notifications_enabled = false;
+
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE || s_ble_conn_handle == conn_handle) {
+        s_ble_conn_handle = 0;
+    }
+
+    if (attr_handle != 0) {
+        s_ble_attr_handle = attr_handle;
+    }
+
+    ESP_LOGI(TAG, "BLE notifications disabled");
+}
+
+esp_err_t power_mgr_get_temperature(int16_t *out_temp) {
+    if (out_temp == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    if (!s_temp_valid) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    *out_temp = s_latest_temp;
+    return ESP_OK;
+}
+
+esp_err_t power_mgr_set_temp_thresholds(int16_t high_temp, int16_t recover_temp) {
+    if (high_temp <= recover_temp) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    s_temp_hi = high_temp;
+    s_temp_rec = recover_temp;
+    
+    // 重置去抖计数器
+    s_hot_debounce_count = 0;
+    s_cool_debounce_count = 0;
+    
+    return nvs_store_thresholds();
+}
+
+esp_err_t power_mgr_get_temp_thresholds(int16_t *high_temp, int16_t *recover_temp) {
+    if (high_temp == NULL || recover_temp == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    *high_temp = s_temp_hi;
+    *recover_temp = s_temp_rec;
+    return ESP_OK;
+}
+
+bool power_mgr_is_thermal_protection_active(void) {
+    return s_thermal_protection;
+}
+
+esp_err_t power_mgr_get_thresholds(uint16_t *sleep_mv, uint16_t *wake_mv) {
+    if (sleep_mv == NULL || wake_mv == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    *sleep_mv = s_sleep_mv;
+    *wake_mv = s_wake_mv;
+    return ESP_OK;
 }

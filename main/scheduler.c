@@ -13,6 +13,9 @@
 
 static const char *TAG = "sched";
 
+// 通道运行态快照
+static control_cmd_t s_channel_snapshots[PWM_CHANNEL_COUNT];
+
 #define SCHED_QUEUE_LENGTH 16
 typedef enum {
     SCHED_EVENT_CMD = 0,
@@ -57,6 +60,8 @@ static esp_err_t handle_command_internal(const control_cmd_t *cmd) {
             esp_err_t err = pwm_control_apply(cmd->channel, value, 0);
             if (err == ESP_OK) {
                 persist_states();
+                // 保存快照
+                s_channel_snapshots[cmd->channel] = *cmd;
             }
             return err;
         }
@@ -67,6 +72,8 @@ static esp_err_t handle_command_internal(const control_cmd_t *cmd) {
             esp_err_t err = pwm_control_apply(cmd->channel, value, duration);
             if (err == ESP_OK) {
                 persist_states();
+                // 保存快照
+                s_channel_snapshots[cmd->channel] = *cmd;
             }
             return err;
         }
@@ -76,6 +83,8 @@ static esp_err_t handle_command_internal(const control_cmd_t *cmd) {
             esp_err_t err = pwm_control_start_blink(cmd->channel, period);
             if (err == ESP_OK) {
                 persist_states();
+                // 保存快照
+                s_channel_snapshots[cmd->channel] = *cmd;
             }
             return err;
         }
@@ -87,6 +96,8 @@ static esp_err_t handle_command_internal(const control_cmd_t *cmd) {
             esp_err_t err = pwm_control_start_strobe(cmd->channel, count, total, pause);
             if (err == ESP_OK) {
                 persist_states();
+                // 保存快照
+                s_channel_snapshots[cmd->channel] = *cmd;
             }
             return err;
         }
@@ -204,4 +215,28 @@ esp_err_t scheduler_execute_preset(uint8_t preset_id, TickType_t ticks_to_wait) 
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
+}
+
+esp_err_t scheduler_get_channel_snapshot(uint8_t ch, control_cmd_t *out_cmd) {
+    if (ch >= PWM_CHANNEL_COUNT || out_cmd == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    *out_cmd = s_channel_snapshots[ch];
+    return ESP_OK;
+}
+
+esp_err_t scheduler_restore_channel_snapshot(uint8_t ch, const control_cmd_t *cmd) {
+    if (ch >= PWM_CHANNEL_COUNT || cmd == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // 直接执行命令恢复状态
+    esp_err_t err = handle_command_internal(cmd);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Restored channel %u to mode 0x%02x", ch, cmd->mode);
+    } else {
+        ESP_LOGW(TAG, "Failed to restore channel %u: %s", ch, esp_err_to_name(err));
+    }
+    return err;
 }

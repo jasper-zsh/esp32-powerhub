@@ -218,7 +218,7 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             {
                 .uuid = &UUID_CH_POWER_MGMT.u,
                 .access_cb = chr_power_mgmt_access,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
             },
             { 0 }
         },
@@ -345,7 +345,17 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "GAP disconnect reason=%d; restart advertising", event->disconnect.reason);
         led_status_set_bluetooth_connected(false);
+        power_mgr_ble_subscribe(BLE_HS_CONN_HANDLE_NONE, 0, false);
         start_advertise();
+        return 0;
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        ESP_LOGI(TAG, "Subscribe event conn=%d attr=%d cur_notify=%d", 
+                 event->subscribe.conn_handle, 
+                 event->subscribe.attr_handle, 
+                 event->subscribe.cur_notify);
+        power_mgr_ble_subscribe(event->subscribe.conn_handle,
+                                event->subscribe.attr_handle,
+                                event->subscribe.cur_notify);
         return 0;
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGI(TAG, "Advertising complete reason=%d, restarting", event->adv_complete.reason);
