@@ -5,7 +5,7 @@
 #include "esp_check.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/adc.h"
+#include "hal/adc_types.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -100,26 +100,9 @@ static uint16_t ulp_get_voltage_mv(void) { return ulp_last_mv & 0xFFFF; }
 static void ulp_share_params(void) {
     ulp_wake_mv = s_wake_mv;
     ulp_cal_off_mv = s_cal_off_mv;
-    ulp_wake_hyst_mv = 200;
 }
 
-static void ulp_start(void) {
-    ulp_riscv_load_binary(ulp_power_bin_start, (ulp_power_bin_end - ulp_power_bin_start));
-    ulp_ok_cnt = 0;
-    ulp_min_sleep_ticks = 0;
-    ulp_share_params();
-    ulp_riscv_timer_stop();
-    ulp_set_wakeup_period(0, 1000000);
-    ulp_riscv_timer_resume();
-    ulp_riscv_run();
-    esp_sleep_enable_ulp_wakeup();
-}
-
-esp_err_t power_mgr_init(void) {
-    nvs_load_thresholds();
-
-    ulp_share_params();
-
+static esp_err_t ulp_start(void) {
     ulp_riscv_adc_cfg_t cfg = {
         .adc_n = ADC_UNIT_1,
         .channel = ADC_CHANNEL_1,
@@ -129,20 +112,30 @@ esp_err_t power_mgr_init(void) {
     };
     ESP_RETURN_ON_ERROR(ulp_riscv_adc_init(&cfg), TAG, "ulp adc init");
 
-    ulp_start();
+    ulp_riscv_load_binary(ulp_power_bin_start, (ulp_power_bin_end - ulp_power_bin_start));
+    ulp_share_params();
+    ulp_set_wakeup_period(0, 1000000);
+    ulp_riscv_run();
+    esp_sleep_enable_ulp_wakeup();
+
+    return ESP_OK;
+}
+
+esp_err_t power_mgr_init(void) {
+    nvs_load_thresholds();
+    ulp_share_params();
+
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+
     if (cause == ESP_SLEEP_WAKEUP_ULP) {
-        if (ulp_wake_flag == 0) {
-            ulp_ok_cnt = 0;
-            ulp_min_sleep_ticks = 15;
-            esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-            esp_sleep_enable_ulp_wakeup();
-            esp_deep_sleep_start();
-        }
-        ESP_LOGI(TAG, "Wake from ULP");
+        ESP_LOGI(TAG, "Deep sleep wakeup");
+        uint16_t voltage = ulp_get_voltage_mv();
+        ESP_LOGI(TAG, "Wake from ULP (vin=%u mV)", voltage);
     } else {
         ESP_LOGI(TAG, "Cold boot or other wake cause=%d", cause);
+        ESP_ERROR_CHECK(ulp_start());
     }
+
     led_status_enable(true);
     led_status_set_low_battery(false);
     
@@ -327,8 +320,6 @@ esp_err_t power_mgr_force_sleep(void) {
     s_cool_debounce_count = 0;
     
     ulp_wake_flag = 0;
-    ulp_ok_cnt = 0;
-    ulp_min_sleep_ticks = 15;
     ESP_LOGI(TAG, "Enter deep sleep");
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
     esp_sleep_enable_ulp_wakeup();
