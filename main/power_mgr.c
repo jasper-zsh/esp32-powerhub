@@ -257,7 +257,7 @@ void power_mgr_task(void *arg) {
         
         // BLE通知
         if (s_ble_notifications_enabled && s_ble_conn_handle != 0) {
-            uint8_t notify_data[8];
+            uint8_t notify_data[12];
             // 电压（mV）
             notify_data[0] = (vin_mv >> 8) & 0xFF;
             notify_data[1] = vin_mv & 0xFF;
@@ -270,7 +270,13 @@ void power_mgr_task(void *arg) {
             // 恢复阈值
             notify_data[6] = (s_temp_rec >> 8) & 0xFF;
             notify_data[7] = s_temp_rec & 0xFF;
-            
+            // 睡眠电压阈值
+            notify_data[8] = (s_sleep_mv >> 8) & 0xFF;
+            notify_data[9] = s_sleep_mv & 0xFF;
+            // 唤醒电压阈值
+            notify_data[10] = (s_wake_mv >> 8) & 0xFF;
+            notify_data[11] = s_wake_mv & 0xFF;
+
             struct os_mbuf *om = ble_hs_mbuf_from_flat(notify_data, sizeof(notify_data));
             if (om != NULL) {
                 ble_gattc_notify_custom(s_ble_conn_handle, s_ble_attr_handle, om);
@@ -334,8 +340,8 @@ int power_mgr_ble_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
     s_ble_attr_handle = attr;
     
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        // v004: 返回12字节的扩展状态
-        uint8_t response[12];
+        // v005: 返回16字节的扩展状态
+        uint8_t response[16];
         
         // uint16 电压（mV）
         uint16_t vin_mv;
@@ -355,20 +361,25 @@ int power_mgr_ble_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
         response[6] = (s_temp_rec >> 8) & 0xFF;
         response[7] = s_temp_rec & 0xFF;
         
+        // uint16 睡眠电压阈值（mV）
+        response[8] = (s_sleep_mv >> 8) & 0xFF;
+        response[9] = s_sleep_mv & 0xFF;
+
+        // uint16 唤醒电压阈值（mV）
+        response[10] = (s_wake_mv >> 8) & 0xFF;
+        response[11] = s_wake_mv & 0xFF;
+
         // uint8 状态标志
         uint8_t status_flags = 0;
         if (s_thermal_protection) status_flags |= 0x01;  // bit0: 热保护中
         if (s_temp_valid) status_flags |= 0x02;          // bit1: 最近一次温度有效
-        // bit2: 保留
-        // bit3: 处于深睡策略中（总是0，因为我们在运行）
-        response[8] = status_flags;
-        
-        // uint8 保留
-        response[9] = 0;
-        
+        // 其余位保留
+        response[12] = status_flags;
+
         // 保留字节
-        response[10] = 0;
-        response[11] = 0;
+        response[13] = 0;
+        response[14] = 0;
+        response[15] = 0;
         
         return os_mbuf_append(ctxt->om, response, sizeof(response)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
