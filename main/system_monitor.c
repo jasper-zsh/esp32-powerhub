@@ -417,7 +417,7 @@ static void monitor_task(void *arg) {
             // 输出通道电流信息 - 独立显示，不受总电流限制
             ESP_LOGI(TAG, "⚡ Channel Currents:");
             for (int i = 0; i < 6; i++) {
-                if (s_state.last_channel_currents[i] >= 0) {
+                if (s_state.last_channel_currents[i] > -10.0f) {  // 允许-10A到+10A的范围，排除明显的错误值
                     ESP_LOGI(TAG, "   CH%d: %.3fA %s", i + 1, s_state.last_channel_currents[i],
                             (s_state.current_overload_active && s_state.overload_channel == i) ? "[OVERLOAD]" : "");
                 } else {

@@ -58,6 +58,10 @@ static esp_err_t init_system_monitor(void);
 static esp_err_t start_system_monitor(void);
 
 void app_main(void) {
+    // 设置调试日志级别
+    esp_log_level_set("adc128s102", ESP_LOG_DEBUG);
+    esp_log_level_set("app", ESP_LOG_DEBUG);
+
     // 检查重启原因
     esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(TAG, "=== ESP32 Power Hub System Starting ===");
