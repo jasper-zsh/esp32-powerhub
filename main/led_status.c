@@ -93,12 +93,10 @@ static void led_status_timer_callback(TimerHandle_t xTimer) {
 
 // 初始化LED状态指示模块
 esp_err_t led_status_init(void) {
-    // 初始化LED RGB驱动
-    esp_err_t err = led_rgb_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize LED RGB driver: %s", esp_err_to_name(err));
-        return err;
-    }
+    // 注意：LED RGB驱动现在由main.c单独初始化
+    // 这里不再调用 led_rgb_init()，避免重复初始化
+
+    ESP_LOGI(TAG, "Initializing LED status manager...");
     
     // 明确初始化所有状态值
     for (int i = 0; i < LED_STATUS_MAX; i++) {

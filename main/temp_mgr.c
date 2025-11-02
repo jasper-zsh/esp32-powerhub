@@ -258,14 +258,6 @@ esp_err_t temp_mgr_sample_once(temp_sensor_type_t sensor_type, int16_t *out_temp
 
     *out_temp = (int16_t)temp_calc;
 
-    // 正确显示温度值，包括负数的小数部分
-    if (*out_temp >= 0) {
-        ESP_LOGI(TAG, "%s sensor temperature: %d.%02d°C", sensor_names[sensor_type], *out_temp / 100, *out_temp % 100);
-    } else {
-        int16_t temp_abs = -*out_temp;
-        ESP_LOGI(TAG, "%s sensor temperature: -%d.%02d°C", sensor_names[sensor_type], temp_abs / 100, temp_abs % 100);
-    }
-
     return ESP_OK;
 }
 
@@ -313,14 +305,6 @@ esp_err_t temp_mgr_sample_all(int16_t out_temps[TEMP_SENSOR_COUNT]) {
             // 范围检查
             if (temp_calc <= 32767 && temp_calc >= -32768) {
                 out_temps[i] = (int16_t)temp_calc;
-
-                // 显示温度值
-                if (out_temps[i] >= 0) {
-                    ESP_LOGI(TAG, "%s sensor temperature: %d.%02d°C", sensor_names[i], out_temps[i] / 100, out_temps[i] % 100);
-                } else {
-                    int16_t temp_abs = -out_temps[i];
-                    ESP_LOGI(TAG, "%s sensor temperature: -%d.%02d°C", sensor_names[i], temp_abs / 100, temp_abs % 100);
-                }
 
                 any_success = true;
             } else {
