@@ -7,7 +7,6 @@
 
 #include "pwm_control.h"
 #include "storage.h"
-#include "preset_mgr.h"
 #include "command_codec.h"
 #include "nvs.h"
 
@@ -19,16 +18,12 @@ static control_cmd_t s_channel_snapshots[PWM_CHANNEL_COUNT];
 #define SCHED_QUEUE_LENGTH 16
 typedef enum {
     SCHED_EVENT_CMD = 0,
-    SCHED_EVENT_EXEC_PRESET,
 } scheduler_event_type_t;
 
 typedef struct {
     scheduler_event_type_t type;
     union {
         control_cmd_t cmd;
-        struct {
-            uint8_t preset_id;
-        } exec_preset;
     } data;
 } scheduler_event_t;
 
@@ -119,23 +114,6 @@ static esp_err_t stop_all_channels(void) {
     return first_err;
 }
 
-static esp_err_t preset_iter_cb(const control_cmd_t *cmd, void *ctx) {
-    (void)ctx;
-    return handle_command_internal(cmd);
-}
-
-static esp_err_t execute_preset(uint8_t preset_id) {
-    if (preset_id == 0) {
-        ESP_LOGI(TAG, "Execute preset 0x00: stop all channels");
-        return stop_all_channels();
-    }
-    esp_err_t err = preset_mgr_iterate_commands(preset_id, preset_iter_cb, NULL);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGW(TAG, "Preset %u not found", preset_id);
-        return ESP_ERR_NOT_FOUND;
-    }
-    return err;
-}
 
 static void scheduler_task(void *param) {
     scheduler_event_t evt;
@@ -150,13 +128,6 @@ static void scheduler_task(void *param) {
                     esp_err_t err = handle_command_internal(&evt.data.cmd);
                     if (err != ESP_OK) {
                         ESP_LOGW(TAG, "Command mode=0x%02X failed err=%d", evt.data.cmd.mode, err);
-                    }
-                    break;
-                }
-                case SCHED_EVENT_EXEC_PRESET: {
-                    esp_err_t err = execute_preset(evt.data.exec_preset.preset_id);
-                    if (err != ESP_OK) {
-                        ESP_LOGW(TAG, "Execute preset %u failed err=%d", evt.data.exec_preset.preset_id, err);
                     }
                     break;
                 }
@@ -200,22 +171,6 @@ esp_err_t scheduler_submit_command(const control_cmd_t *cmd, TickType_t ticks_to
     return ESP_OK;
 }
 
-esp_err_t scheduler_execute_preset(uint8_t preset_id, TickType_t ticks_to_wait) {
-    if (!s_evt_queue) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    scheduler_event_t evt = {
-        .type = SCHED_EVENT_EXEC_PRESET,
-        .data.exec_preset = {
-            .preset_id = preset_id,
-        },
-    };
-    BaseType_t rc = xQueueSend(s_evt_queue, &evt, ticks_to_wait);
-    if (rc != pdPASS) {
-        return ESP_ERR_TIMEOUT;
-    }
-    return ESP_OK;
-}
 
 esp_err_t scheduler_get_channel_snapshot(uint8_t ch, control_cmd_t *out_cmd) {
     if (ch >= PWM_CHANNEL_COUNT || out_cmd == NULL) {

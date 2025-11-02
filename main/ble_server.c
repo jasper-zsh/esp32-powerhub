@@ -16,7 +16,6 @@
 
 #include "pwm_control.h"
 #include "scheduler.h"
-#include "preset_mgr.h"
 #include "command_codec.h"
 #include "led_status.h"
 #include "power_mgr.h"
@@ -32,9 +31,6 @@ static int chr_power_mgmt_access(uint16_t conn_handle, uint16_t attr_handle, str
 static const ble_uuid128_t UUID_SERVICE = BLE_UUID128_INIT(0x11,0x9b,0x5f,0x1b,0x1c,0x7a,0x3e,0x8e,0x61,0x47,0x72,0x6f,0x01,0x00,0x0b,0x5e);
 static const ble_uuid16_t UUID_CH_STATE   = BLE_UUID16_INIT(0xFFF0);
 static const ble_uuid16_t UUID_CH_CONTROL = BLE_UUID16_INIT(0xFFF1);
-static const ble_uuid16_t UUID_CH_PRESET_READ  = BLE_UUID16_INIT(0xFFF2);
-static const ble_uuid16_t UUID_CH_PRESET_WRITE = BLE_UUID16_INIT(0xFFF3);
-static const ble_uuid16_t UUID_CH_PRESET_EXEC  = BLE_UUID16_INIT(0xFFF4);
 static const ble_uuid16_t UUID_CH_POWER_MGMT   = BLE_UUID16_INIT(0xFFF5);
 
 static uint16_t s_state_val_handle;
@@ -50,67 +46,6 @@ static int chr_state_access(uint16_t conn_handle, uint16_t attr_handle, struct b
     return BLE_ATT_ERR_READ_NOT_PERMITTED;
 }
 
-typedef struct {
-    struct os_mbuf *om;
-} preset_read_ctx_t;
-
-static esp_err_t preset_read_iter_cb(const uint8_t *entry, size_t len, void *ctx) {
-    preset_read_ctx_t *read_ctx = (preset_read_ctx_t *)ctx;
-    if (len == 0) {
-        return ESP_OK;
-    }
-    return os_mbuf_append(read_ctx->om, entry, len) == 0 ? ESP_OK : ESP_FAIL;
-}
-
-static int chr_preset_read_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) {
-        return BLE_ATT_ERR_READ_NOT_PERMITTED;
-    }
-    preset_read_ctx_t ctx = {
-        .om = ctxt->om,
-    };
-    esp_err_t err = preset_mgr_for_each_entry(preset_read_iter_cb, &ctx);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Preset read iteration err=%d", err);
-        return BLE_ATT_ERR_INSUFFICIENT_RES;
-    }
-    return 0;
-}
-
-static int chr_preset_write_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
-    }
-    uint16_t total_len = OS_MBUF_PKTLEN(ctxt->om);
-    if (total_len < 2 || total_len > 512) {
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    }
-    uint8_t *buf = malloc(total_len);
-    if (!buf) {
-        return BLE_ATT_ERR_INSUFFICIENT_RES;
-    }
-    uint16_t copied = 0;
-    int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, total_len, &copied);
-    if (rc != 0 || copied != total_len) {
-        free(buf);
-        ESP_LOGW(TAG, "Preset write flatten rc=%d copied=%u len=%u", rc, copied, total_len);
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-    if (buf[0] == 0x00) {
-        free(buf);
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    }
-    esp_err_t err = preset_mgr_store(buf, copied);
-    free(buf);
-    if (err == ESP_OK) {
-        return 0;
-    }
-    ESP_LOGW(TAG, "Preset store err=%d", err);
-    if (err == ESP_ERR_INVALID_SIZE || err == ESP_ERR_INVALID_ARG) {
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    }
-    return BLE_ATT_ERR_UNLIKELY;
-}
 
 static int chr_control_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
@@ -152,37 +87,6 @@ static int chr_control_access(uint16_t conn_handle, uint16_t attr_handle, struct
     return 0;
 }
 
-static int chr_preset_exec_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
-    }
-    uint16_t total_len = OS_MBUF_PKTLEN(ctxt->om);
-    if (total_len != 1) {
-        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    }
-    uint8_t preset_id = 0;
-    uint16_t copied = 0;
-    int rc = ble_hs_mbuf_to_flat(ctxt->om, &preset_id, sizeof(preset_id), &copied);
-    if (rc != 0 || copied != 1) {
-        ESP_LOGW(TAG, "Preset exec flatten rc=%d copied=%u", rc, copied);
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-    esp_err_t err = scheduler_execute_preset(preset_id, pdMS_TO_TICKS(200));
-    if (err == ESP_OK) {
-        return 0;
-    }
-    if (err == ESP_ERR_TIMEOUT) {
-        return BLE_ATT_ERR_INSUFFICIENT_RES;
-    }
-    if (err == ESP_ERR_NOT_FOUND) {
-        return BLE_ATT_ERR_ATTR_NOT_FOUND;
-    }
-    if (err == ESP_ERR_INVALID_STATE) {
-        return BLE_ATT_ERR_UNLIKELY;
-    }
-    ESP_LOGW(TAG, "Preset exec err=%d", err);
-    return BLE_ATT_ERR_UNLIKELY;
-}
 
 static const struct ble_gatt_svc_def gatt_svcs[] = {
     {
@@ -200,22 +104,7 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
                 .access_cb = chr_control_access,
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
-            {
-                .uuid = &UUID_CH_PRESET_READ.u,
-                .access_cb = chr_preset_read_access,
-                .flags = BLE_GATT_CHR_F_READ,
-            },
-            {
-                .uuid = &UUID_CH_PRESET_WRITE.u,
-                .access_cb = chr_preset_write_access,
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
-            },
-            {
-                .uuid = &UUID_CH_PRESET_EXEC.u,
-                .access_cb = chr_preset_exec_access,
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
-            },
-            {
+                    {
                 .uuid = &UUID_CH_POWER_MGMT.u,
                 .access_cb = chr_power_mgmt_access,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,

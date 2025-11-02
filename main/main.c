@@ -10,7 +10,6 @@
 #include "pwm_control.h"
 #include "storage.h"
 #include "ble_server.h"
-#include "preset_mgr.h"
 #include "scheduler.h"
 #include "led_status.h"
 #include "power_mgr.h"
@@ -34,8 +33,7 @@ typedef struct {
     bool temp_mgr_initialized;
     bool pwm_control_initialized;
     bool adc128s102_initialized;
-    bool preset_mgr_initialized;
-    bool scheduler_initialized;
+      bool scheduler_initialized;
     bool ble_server_initialized;
     bool adc_sampling_started;
     bool system_monitor_initialized;
@@ -53,7 +51,6 @@ static esp_err_t init_power_manager(void);
 static esp_err_t init_temperature_manager(void);
 static esp_err_t init_pwm_controller(void);
 static esp_err_t init_adc128s102(void);
-static esp_err_t init_preset_manager(void);
 static esp_err_t init_scheduler(void);
 static esp_err_t init_ble_server(void);
 static esp_err_t start_adc_sampling(void);
@@ -160,21 +157,15 @@ void app_main(void) {
         // 继续执行，但监控功能不可用
     }
 
-    // 11. 初始化预设管理器
-    ret = init_preset_manager();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Preset manager initialization failed");
-        // 继续执行，但预设功能不可用
-    }
-
-    // 12. 初始化调度器
+  
+    // 11. 初始化调度器
     ret = init_scheduler();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Scheduler initialization failed");
         return;  // 调度器是关键组件
     }
 
-    // 13. 初始化BLE服务器
+    // 12. 初始化BLE服务器
     ret = init_ble_server();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "BLE server initialization failed");
@@ -364,30 +355,13 @@ static esp_err_t init_adc128s102(void) {
     return ret;
 }
 
-/**
- * @brief 初始化预设管理器
- * @note 预设模式管理
- */
-static esp_err_t init_preset_manager(void) {
-    ESP_LOGI(TAG, "[9/12] Initializing preset manager...");
-
-    esp_err_t ret = preset_mgr_init();
-    if (ret == ESP_OK) {
-        g_subsys_status.preset_mgr_initialized = true;
-        ESP_LOGI(TAG, "✓ Preset manager initialized");
-    } else {
-        ESP_LOGE(TAG, "✗ Preset manager initialization failed: %s", esp_err_to_name(ret));
-    }
-
-    return ret;
-}
 
 /**
  * @brief 初始化调度器
  * @note 任务调度管理
  */
 static esp_err_t init_scheduler(void) {
-    ESP_LOGI(TAG, "[10/12] Initializing scheduler...");
+    ESP_LOGI(TAG, "[9/12] Initializing scheduler...");
 
     esp_err_t ret = scheduler_init();
     if (ret == ESP_OK) {
@@ -405,7 +379,7 @@ static esp_err_t init_scheduler(void) {
  * @note 蓝牙通信服务
  */
 static esp_err_t init_ble_server(void) {
-    ESP_LOGI(TAG, "[11/12] Initializing BLE server...");
+    ESP_LOGI(TAG, "[10/12] Initializing BLE server...");
 
     esp_err_t ret = ble_server_init();
     if (ret == ESP_OK) {
