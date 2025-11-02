@@ -8,9 +8,9 @@
 
 static const char *TAG = "pwm";
 
-// GPIO mapping (严格按照硬件定义)
-// CH1-6 使用 GPIO 21,20,19,18,15,14
-static const int s_gpio[PWM_CHANNEL_COUNT] = {21, 20, 19, 18, 15, 14};
+// GPIO mapping (根据最新硬件定义更新)
+// CH1-6 使用 GPIO 8,9,10,11,12,13
+static const int s_gpio[PWM_CHANNEL_COUNT] = {8, 9, 10, 11, 12, 13};
 
 // LEDC channels mapping
 static const ledc_channel_t s_ledc_ch[PWM_CHANNEL_COUNT] = {

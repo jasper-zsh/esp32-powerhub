@@ -11,7 +11,7 @@ extern "C" {
 
 #define PWM_CHANNEL_COUNT 6
 
-// Fixed mapping per design: CH1..CH6 -> GPIO8/9/10/11/12/13
+// Fixed mapping per latest hardware design: CH1..CH6 -> GPIO8/9/10/11/12/13
 typedef enum {
     CH1 = 0,
     CH2 = 1,

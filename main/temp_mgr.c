@@ -8,8 +8,8 @@
 
 static const char *TAG = "temp_mgr";
 
-// DS18B20引脚定义 - 根据设计文档，两个DS18B20连接到GPIO22
-#define DS18B20_DQ_GPIO     GPIO_NUM_22
+// DS18B20引脚定义 - 根据最新硬件定义，两个DS18B20连接到GPIO7
+#define DS18B20_DQ_GPIO     GPIO_NUM_7
 static bool temp_mgr_initialized = false;
 
 static onewire_gpio_bus_handle_t bus = NULL;

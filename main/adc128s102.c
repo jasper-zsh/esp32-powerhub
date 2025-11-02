@@ -14,11 +14,11 @@ struct ble_gatt_access_ctxt;
 
 static const char *TAG = "adc128s102";
 
-// SPI配置
-#define ADC_CS_PIN               2   // GPIO2
-#define ADC_SCLK_PIN             3   // GPIO3
-#define ADC_MISO_PIN             4   // GPIO4
-#define ADC_MOSI_PIN             5   // GPIO5
+// SPI配置 - 根据最新硬件定义更新
+#define ADC_CS_PIN               3   // GPIO3 (CS)
+#define ADC_SCLK_PIN             4   // GPIO4 (SCLK)
+#define ADC_MISO_PIN             5   // GPIO5 (MISO)
+#define ADC_MOSI_PIN             6   // GPIO6 (MOSI)
 
 // SPI主机配置
 #define ADC_SPI_HOST             SPI2_HOST

@@ -25,8 +25,8 @@
 
 static const char *TAG = "power_mgr";
 
-// 外设电源控制引脚
-#define EXTERNAL_POWER_CTRL_GPIO    0  // GPIO0控制所有外设电源
+// 外设电源控制引脚 - 根据最新硬件定义更新
+#define EXTERNAL_POWER_CTRL_GPIO    1  // GPIO1控制所有外设电源
 
 // NVS配置键
 #define NVS_NS "power_mgr"
@@ -146,7 +146,7 @@ static uint16_t adc_read_voltage_mv(void) {
 
     if (adc_oneshot_read(s_adc_handle, ADC1_GPIO1_CHANNEL, &raw_value) == ESP_OK) {
         if (adc_cali_raw_to_voltage(s_adc_cali_handle, raw_value, &voltage_mv) == ESP_OK) {
-            // 分压比计算 (240k:910k = 1:4.7917)
+            // 分压比计算 (240k:910k，实际分压比 = (240k+910k)/240k = 4.7917)
             s_last_voltage_mv = (uint32_t)(voltage_mv * 4.7917f) + s_cal_off_mv;
         }
     }

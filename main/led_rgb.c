@@ -7,7 +7,7 @@
 
 static const char *TAG = "led_rgb";
 
-#define WS2812_LED_GPIO 8
+#define WS2812_LED_GPIO 21  // 根据最新硬件定义更新
 #define RMT_CHANNEL_CLK_HZ 10000000 // 10MHz resolution, 100ns tick
 
 // WS2812 timing constants
