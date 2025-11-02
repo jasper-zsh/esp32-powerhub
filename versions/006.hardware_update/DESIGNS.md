@@ -1,7 +1,7 @@
 # 版本006 - 硬件定义更新设计文档
 
 ## 设计概述
-基于ESP32C6的电源管理器硬件升级，重点实现ADC128S102外置ADC集成、6通道PWM控制扩展、外设电源管理等新功能。本设计不保持向后兼容性，完全重新设计系统架构。
+基于ESP32S3的电源管理器硬件升级，重点实现外设电源管理、ADC128S102外置ADC集成、6通道PWM控制扩展、温度监测系统等新功能。本设计不保持向后兼容性，完全重新设计系统架构。
 
 ## 系统架构设计
 
@@ -9,21 +9,21 @@
 
 #### 1.1 GPIO映射定义
 ```c
-// 硬件引脚定义
-#define EXTERNAL_POWER_CTRL_GPIO      0   // 外设电源控制
-#define VOLTAGE_SENSE_GPIO            1   // 电源电压分压输入
-#define ADC_CS_GPIO                   2   // ADC128S102片选
-#define ADC_SCLK_GPIO                 3   // ADC128S102时钟
-#define ADC_MISO_GPIO                 4   // ADC128S102数据输入
-#define ADC_MOSI_GPIO                 5   // ADC128S102数据输出
-#define TEMP_SENSOR_GPIO              22  // DS18B20温度传感器
-#define PWM_CH1_GPIO                  21  // PWM通道1
-#define PWM_CH2_GPIO                  20  // PWM通道2
-#define PWM_CH3_GPIO                  19  // PWM通道3
-#define PWM_CH4_GPIO                  18  // PWM通道4
-#define PWM_CH5_GPIO                  15  // PWM通道5
-#define PWM_CH6_GPIO                  14  // PWM通道6
-#define RGB_LED_GPIO                  8   // WS2812 RGB LED
+// 硬件引脚定义 - 基于最新的硬件定义
+#define EXTERNAL_POWER_CTRL_GPIO      1   // 外设电源控制 (所有外设电源)
+#define VOLTAGE_SENSE_GPIO            1   // 电源电压分压输入 (240k:910k)
+#define ADC_CS_GPIO                   3   // ADC128S102片选
+#define ADC_SCLK_GPIO                 4   // ADC128S102时钟
+#define ADC_MISO_GPIO                 5   // ADC128S102数据输入
+#define ADC_MOSI_GPIO                 6   // ADC128S102数据输出
+#define TEMP_SENSOR_GPIO              7   // DS18B20温度传感器 (两个传感器)
+#define PWM_CH1_GPIO                  8   // PWM通道1
+#define PWM_CH2_GPIO                  9   // PWM通道2
+#define PWM_CH3_GPIO                  10  // PWM通道3
+#define PWM_CH4_GPIO                  11  // PWM通道4
+#define PWM_CH5_GPIO                  12  // PWM通道5
+#define PWM_CH6_GPIO                  13  // PWM通道6
+#define RGB_LED_GPIO                  21  // WS2812 RGB LED
 ```
 
 #### 1.2 传感器数据结构
@@ -37,10 +37,10 @@ typedef struct {
 
 // 电源状态数据
 typedef struct {
-    float supply_voltage;           // 电源电压
-    float power_area_temp;          // 电源区域温度
-    float control_area_temp;        // 控制区域温度
-    uint16_t external_power_state;  // 外设电源状态
+    float supply_voltage;           // 电源电压 (通过分压电阻测量)
+    float power_area_temp;          // 电源区域温度 (DS18B20)
+    float control_area_temp;        // 控制区域温度 (DS18B20)
+    bool external_power_state;      // 外设电源状态 (GPIO1控制)
     uint32_t timestamp;             // 更新时间戳
 } power_status_t;
 ```
@@ -53,6 +53,7 @@ typedef struct {
   - 时钟频率: 1MHz (确保信号完整性)
   - 数据位: 8位
   - 模式: MODE 0 (CPOL=0, CPHA=0)
+- **引脚连接**: GPIO3(CS), GPIO4(SCLK), GPIO5(MISO), GPIO6(MOSI)
 - **通信协议**:
   - 启动转换: 发送通道选择字节
   - 读取数据: 延迟后读取12位ADC结果
@@ -79,24 +80,61 @@ float current = (adc_voltage - offset) / (sensitivity / 1000.0f);
 - **数据滤波**: 使用滑动平均滤波，窗口大小10
 - **校准机制**: 支持零点校准和增益校准
 
-### 3. 6通道PWM控制系统设计
+### 3. 外设电源管理设计
 
-#### 3.1 LEDC控制器配置
+#### 3.1 电源控制逻辑
+```c
+typedef enum {
+    POWER_STATE_OFF = 0,           // 外设电源关闭
+    POWER_STATE_ON,                // 外设电源开启
+    POWER_STATE_TRANSITIONING      // 状态切换中
+} external_power_state_t;
+
+// 上电时序
+void system_wakeup_sequence(void) {
+    gpio_set_level(EXTERNAL_POWER_CTRL_GPIO, 1);  // 开启外设电源
+    vTaskDelay(pdMS_TO_TICKS(100));                // 等待电源稳定
+    // 初始化外设...
+}
+
+// 下电时序
+void system_sleep_sequence(void) {
+    // 关闭外设...
+    vTaskDelay(pdMS_TO_TICKS(50));                 // 等待外设关闭
+    gpio_set_level(EXTERNAL_POWER_CTRL_GPIO, 0);  // 关闭外设电源
+}
+```
+
+#### 3.2 电压监测设计
+```c
+// 分压电阻参数
+#define VOLTAGE_DIVIDER_R1        240000.0f  // 240kΩ
+#define VOLTAGE_DIVIDER_R2        910000.0f  // 910kΩ
+#define VOLTAGE_DIVIDER_RATIO     (VOLTAGE_DIVIDER_R2 / (VOLTAGE_DIVIDER_R1 + VOLTAGE_DIVIDER_R2))
+
+// 电压计算
+float adc_voltage = adc_raw * 3.3f / 4096.0f;  // ADC读数转换为电压
+float actual_voltage = adc_voltage / VOLTAGE_DIVIDER_RATIO;  // 补偿分压比
+```
+
+### 4. 6通道PWM控制系统设计
+
+#### 4.1 LEDC控制器配置
 - **定时器配置**:
   - 频率: 5kHz (平衡控制精度和功耗)
   - 分辨率: 13位 (8192级精度)
   - 定时器: LEDC_TIMER_0 (所有通道共享同一个定时器)
-- **ESP32C6特性**: 使用ESP32C6的低功耗PWM控制器，支持睡眠模式下的PWM输出
+- **ESP32S3特性**: 使用ESP32S3的LEDC控制器，支持高精度PWM输出
 - **通道映射**:
-  - PWM_CH1: LEDC_CHANNEL_0 -> GPIO21
-  - PWM_CH2: LEDC_CHANNEL_1 -> GPIO20
-  - PWM_CH3: LEDC_CHANNEL_2 -> GPIO19
-  - PWM_CH4: LEDC_CHANNEL_3 -> GPIO18
-  - PWM_CH5: LEDC_CHANNEL_4 -> GPIO15
-  - PWM_CH6: LEDC_CHANNEL_5 -> GPIO14
+  - PWM_CH1: LEDC_CHANNEL_0 -> GPIO8
+  - PWM_CH2: LEDC_CHANNEL_1 -> GPIO9
+  - PWM_CH3: LEDC_CHANNEL_2 -> GPIO10
+  - PWM_CH4: LEDC_CHANNEL_3 -> GPIO11
+  - PWM_CH5: LEDC_CHANNEL_4 -> GPIO12
+  - PWM_CH6: LEDC_CHANNEL_5 -> GPIO13
 - **CH5/CH6特性**: 与CH1-CH4完全相同的控制逻辑和功能
 
-#### 3.2 模式控制实现
+#### 4.2 模式控制实现
 ```c
 typedef enum {
     PWM_MODE_OFF = 0,              // 高阻态
@@ -124,13 +162,13 @@ typedef struct {
 pwm_channel_config_t pwm_channels[6];  // 索引0-5对应CH1-CH6
 ```
 
-#### 3.3 渐变算法
+#### 4.3 渐变算法
 使用线性插值实现平滑渐变：
 ```c
 current_value = start_value + (target_value - start_value) * progress;
 ```
 
-#### 3.4 CH5/CH6接口函数
+#### 4.4 CH5/CH6接口函数
 CH5/CH6提供与CH1-CH4完全相同的API接口，确保6通道功能一致性：
 ```c
 // 通用PWM控制接口 (支持所有6个通道)
@@ -145,38 +183,13 @@ void pwm_set_all_channels(uint8_t value);                       // 同时设置�
 void pwm_set_channels_batch(uint8_t channels[], uint8_t values[], uint8_t count);  // 批量设置指定通道
 ```
 
-#### 3.5 CH5/CH6硬件配置
+#### 4.5 CH5/CH6硬件配置
 CH5/CH6的硬件配置与CH1-CH4完全相同，确保6通道性能一致：
 - **PWM频率**: 5kHz (与CH1-CH4相同)
 - **分辨率**: 13位 (8192级精度，与CH1-CH4相同)
-- **输出驱动**: GPIO15/14推挽输出
+- **输出驱动**: GPIO12/13推挽输出
 - **最大负载**: 与CH1-CH4相同的驱动能力
 - **保护机制**: 过流、过温、短路保护功能一致
-
-### 4. 外设电源管理设计
-
-#### 4.1 电源时序控制
-```c
-typedef enum {
-    POWER_STATE_OFF = 0,           // 外设电源关闭
-    POWER_STATE_ON,                // 外设电源开启
-    POWER_STATE_TRANSITIONING      // 状态切换中
-} external_power_state_t;
-
-// 上电时序
-void system_wakeup_sequence(void) {
-    gpio_set_level(EXTERNAL_POWER_CTRL_GPIO, 1);  // 开启外设电源
-    vTaskDelay(pdMS_TO_TICKS(100));                // 等待电源稳定
-    // 初始化外设...
-}
-
-// 下电时序
-void system_sleep_sequence(void) {
-    // 关闭外设...
-    vTaskDelay(pdMS_TO_TICKS(50));                 // 等待外设关闭
-    gpio_set_level(EXTERNAL_POWER_CTRL_GPIO, 0);  // 关闭外设电源
-}
-```
 
 ### 5. 温度监测系统设计
 
