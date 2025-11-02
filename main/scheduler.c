@@ -9,6 +9,7 @@
 #include "storage.h"
 #include "command_codec.h"
 #include "nvs.h"
+#include "ble_server.h"
 
 static const char *TAG = "sched";
 
@@ -111,6 +112,10 @@ static esp_err_t stop_all_channels(void) {
         }
     }
     persist_states();
+
+    // Check and send BLE notifications if channel states changed
+    ble_server_check_state_notifications();
+
     return first_err;
 }
 
@@ -126,7 +131,10 @@ static void scheduler_task(void *param) {
                         break;
                     }
                     esp_err_t err = handle_command_internal(&evt.data.cmd);
-                    if (err != ESP_OK) {
+                    if (err == ESP_OK) {
+                        // Check and send BLE notifications if channel states changed
+                        ble_server_check_state_notifications();
+                    } else {
                         ESP_LOGW(TAG, "Command mode=0x%02X failed err=%d", evt.data.cmd.mode, err);
                     }
                     break;

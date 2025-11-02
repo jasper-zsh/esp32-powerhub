@@ -256,33 +256,7 @@ void power_mgr_task(void *arg) {
             }
         }
 
-        // BLE通知
-        if (s_ble_notifications_enabled && s_ble_conn_handle != 0) {
-            uint8_t notify_data[12];
-            // 电压（mV）
-            notify_data[0] = (vin_mv >> 8) & 0xFF;
-            notify_data[1] = vin_mv & 0xFF;
-            // 温度（0.01°C）
-            notify_data[2] = (s_latest_temp >> 8) & 0xFF;
-            notify_data[3] = s_latest_temp & 0xFF;
-            // 高温阈值
-            notify_data[4] = (s_temp_hi >> 8) & 0xFF;
-            notify_data[5] = s_temp_hi & 0xFF;
-            // 恢复阈值
-            notify_data[6] = (s_temp_rec >> 8) & 0xFF;
-            notify_data[7] = s_temp_rec & 0xFF;
-            // 睡眠电压阈值
-            notify_data[8] = (s_sleep_mv >> 8) & 0xFF;
-            notify_data[9] = s_sleep_mv & 0xFF;
-            // 唤醒电压阈值
-            notify_data[10] = (s_wake_mv >> 8) & 0xFF;
-            notify_data[11] = s_wake_mv & 0xFF;
-
-            struct os_mbuf *om = ble_hs_mbuf_from_flat(notify_data, sizeof(notify_data));
-            if (om != NULL) {
-                ble_gattc_notify_custom(s_ble_conn_handle, s_ble_attr_handle, om);
-            }
-        }
+        // 实时监控通知已移至CH_MONITORING特征，此处不再发送通知
     }
 }
 
@@ -341,46 +315,31 @@ int power_mgr_ble_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
     s_ble_attr_handle = attr;
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        // v005: 返回16字节的扩展状态
-        uint8_t response[16];
-
-        // uint16 电压（mV）
-        uint16_t vin_mv;
-        power_mgr_get_voltage_mv(&vin_mv, false);
-        response[0] = (vin_mv >> 8) & 0xFF;
-        response[1] = vin_mv & 0xFF;
-
-        // int16 温度（0.01°C）
-        response[2] = (s_latest_temp >> 8) & 0xFF;
-        response[3] = s_latest_temp & 0xFF;
+        // 电源管理特征现在只返回配置数据（8字节），状态位已移至监控特征
+        uint8_t response[8];
+        int offset = 0;
 
         // int16 高温阈值（0.01°C）
-        response[4] = (s_temp_hi >> 8) & 0xFF;
-        response[5] = s_temp_hi & 0xFF;
+        response[offset++] = (s_temp_hi >> 8) & 0xFF;
+        response[offset++] = s_temp_hi & 0xFF;
 
         // int16 恢复阈值（0.01°C）
-        response[6] = (s_temp_rec >> 8) & 0xFF;
-        response[7] = s_temp_rec & 0xFF;
+        response[offset++] = (s_temp_rec >> 8) & 0xFF;
+        response[offset++] = s_temp_rec & 0xFF;
 
         // uint16 睡眠电压阈值（mV）
-        response[8] = (s_sleep_mv >> 8) & 0xFF;
-        response[9] = s_sleep_mv & 0xFF;
+        response[offset++] = (s_sleep_mv >> 8) & 0xFF;
+        response[offset++] = s_sleep_mv & 0xFF;
 
         // uint16 唤醒电压阈值（mV）
-        response[10] = (s_wake_mv >> 8) & 0xFF;
-        response[11] = s_wake_mv & 0xFF;
+        response[offset++] = (s_wake_mv >> 8) & 0xFF;
+        response[offset++] = s_wake_mv & 0xFF;
 
-        // uint8 状态标志
-        uint8_t status_flags = 0;
-        if (s_thermal_protection) status_flags |= 0x01;  // bit0: 热保护中
-        if (s_temp_valid) status_flags |= 0x02;          // bit1: 最近一次温度有效
-        // 其余位保留
-        response[12] = status_flags;
-
-        // 保留字节
-        response[13] = 0;
-        response[14] = 0;
-        response[15] = 0;
+        // 确保返回了8字节
+        if (offset != 8) {
+            ESP_LOGE(TAG, "Power management config size mismatch: expected 8, got %d", offset);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
 
         return os_mbuf_append(ctxt->om, response, sizeof(response)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
@@ -461,6 +420,14 @@ esp_err_t power_mgr_get_temperature(int16_t *out_temp) {
 
     *out_temp = s_latest_temp;
     return ESP_OK;
+}
+
+esp_err_t power_mgr_get_latest_temp(int16_t *out_temp) {
+    if (!out_temp) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_temp = s_latest_temp;
+    return s_temp_valid ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 esp_err_t power_mgr_set_temp_thresholds(int16_t high_temp, int16_t recover_temp) {

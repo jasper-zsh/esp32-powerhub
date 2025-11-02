@@ -9,6 +9,9 @@
 
 #include <string.h>
 #include <math.h>
+#include "host/ble_hs.h"
+#include "power_mgr.h"
+#include "temp_mgr.h"
 
 struct ble_gatt_access_ctxt;
 
@@ -300,8 +303,113 @@ static void sampling_task(void *arg) {
             }
 
             // 发送BLE通知
-            if (s_ble_notifications_enabled) {
-                // TODO: 发送BLE通知
+            if (s_ble_notifications_enabled && s_ble_conn_handle != 0) {
+                // 构建36字节的监控数据通知
+                uint8_t notify_data[36];
+                int offset = 0;
+
+                // 1. 输入电压 (uint16, mV)
+                uint16_t vin_mv;
+                if (power_mgr_get_voltage_mv(&vin_mv, false) == ESP_OK) {
+                    notify_data[offset++] = (vin_mv >> 8) & 0xFF;
+                    notify_data[offset++] = vin_mv & 0xFF;
+                } else {
+                    notify_data[offset++] = 0xFF;
+                    notify_data[offset++] = 0xFF;
+                }
+
+                // 2. 电源区域温度 (int16, 0.01°C)
+                int16_t power_temp;
+                if (temp_mgr_sample_once(TEMP_SENSOR_POWER, &power_temp) == ESP_OK) {
+                    notify_data[offset++] = (power_temp >> 8) & 0xFF;
+                    notify_data[offset++] = power_temp & 0xFF;
+                } else {
+                    notify_data[offset++] = 0x80;  // 无效温度标记
+                    notify_data[offset++] = 0x00;
+                }
+
+                // 3. 控制区域温度 (int16, 0.01°C)
+                int16_t control_temp;
+                if (temp_mgr_sample_once(TEMP_SENSOR_CONTROL, &control_temp) == ESP_OK) {
+                    notify_data[offset++] = (control_temp >> 8) & 0xFF;
+                    notify_data[offset++] = control_temp & 0xFF;
+                } else {
+                    notify_data[offset++] = 0x80;  // 无效温度标记
+                    notify_data[offset++] = 0x00;
+                }
+
+                // 4. 电流数据
+                // 4.1 总输入电流 (float, 4字节)
+                union { float f; uint32_t u; } total_current_union;
+                total_current_union.f = data.total_input_current;
+                notify_data[offset++] = (total_current_union.u >> 24) & 0xFF;
+                notify_data[offset++] = (total_current_union.u >> 16) & 0xFF;
+                notify_data[offset++] = (total_current_union.u >> 8) & 0xFF;
+                notify_data[offset++] = total_current_union.u & 0xFF;
+
+                // 4.2 各通道电流 (6 x float = 24字节)
+                for (int i = 0; i < 6; i++) {
+                    union { float f; uint32_t u; } channel_current_union;
+                    channel_current_union.f = data.channel_currents[i];
+                    notify_data[offset++] = (channel_current_union.u >> 24) & 0xFF;
+                    notify_data[offset++] = (channel_current_union.u >> 16) & 0xFF;
+                    notify_data[offset++] = (channel_current_union.u >> 8) & 0xFF;
+                    notify_data[offset++] = channel_current_union.u & 0xFF;
+                }
+
+                // 5. 系统状态标志
+                uint8_t status_flags = 0;
+
+                // 热保护状态
+                if (power_mgr_is_thermal_protection_active()) {
+                    status_flags |= 0x01;  // bit0: 热保护中
+                }
+
+                // 温度数据有效性
+                int16_t power_temp_check, control_temp_check;
+                if (temp_mgr_sample_once(TEMP_SENSOR_POWER, &power_temp_check) == ESP_OK &&
+                    temp_mgr_sample_once(TEMP_SENSOR_CONTROL, &control_temp_check) == ESP_OK) {
+                    status_flags |= 0x02;  // bit1: 温度数据有效
+                }
+
+                // 电流数据有效性 (在当前上下文中已经是有效的)
+                status_flags |= 0x04;  // bit2: 电流数据有效
+
+                // 校准状态
+                bool calibration_valid = true;  // TODO: 实现真正的校准状态检查
+                if (calibration_valid) {
+                    status_flags |= 0x08;  // bit3: 校准状态
+                }
+
+                // 外设电源状态
+                if (power_mgr_external_power_is_on()) {
+                    status_flags |= 0x10;  // bit4: 外设电源开启
+                }
+
+                notify_data[offset++] = status_flags;
+
+                // 6. 保留字节
+                notify_data[offset++] = 0x00;
+
+                // 发送通知
+                struct os_mbuf *om = ble_hs_mbuf_att_pkt();
+                if (om) {
+                    int append_rc = os_mbuf_append(om, notify_data, sizeof(notify_data));
+                    if (append_rc == 0) {
+                        int notify_rc = ble_gatts_notify_custom(s_ble_conn_handle, s_ble_attr_handle, om);
+                        if (notify_rc == 0) {
+                            ESP_LOGD(TAG, "Sent monitoring notification (36 bytes)");
+                        } else {
+                            ESP_LOGW(TAG, "Failed to send monitoring notification: %d", notify_rc);
+                            os_mbuf_free_chain(om);
+                        }
+                    } else {
+                        ESP_LOGW(TAG, "Failed to append monitoring data: %d", append_rc);
+                        os_mbuf_free_chain(om);
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Failed to allocate mbuf for monitoring notification");
+                }
             }
         } else {
             ESP_LOGW(TAG, "Failed to read current data: %s", esp_err_to_name(ret));
@@ -439,8 +547,117 @@ esp_err_t adc128s102_calibrate_zero_point(void) {
 
 // BLE接口实现
 int adc128s102_ble_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt) {
-    // TODO: 实现BLE访问接口
-    return 0;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        // 监控特征返回36字节的完整监控数据
+        // 格式: 电压(2) + 电源温度(2) + 控制温度(2) + 总电流(4) + 6通道电流(24) + 状态(1) + 保留(1) = 36字节
+        uint8_t response[36];
+        int offset = 0;
+
+        // 1. 输入电压 (uint16, mV)
+        uint16_t vin_mv;
+        if (power_mgr_get_voltage_mv(&vin_mv, false) == ESP_OK) {
+            response[offset++] = (vin_mv >> 8) & 0xFF;
+            response[offset++] = vin_mv & 0xFF;
+        } else {
+            response[offset++] = 0xFF;
+            response[offset++] = 0xFF;
+        }
+
+        // 2. 电源区域温度 (int16, 0.01°C)
+        int16_t power_temp;
+        if (temp_mgr_sample_once(TEMP_SENSOR_POWER, &power_temp) == ESP_OK) {
+            response[offset++] = (power_temp >> 8) & 0xFF;
+            response[offset++] = power_temp & 0xFF;
+        } else {
+            response[offset++] = 0x80;  // 无效温度标记
+            response[offset++] = 0x00;
+        }
+
+        // 3. 控制区域温度 (int16, 0.01°C)
+        int16_t control_temp;
+        if (temp_mgr_sample_once(TEMP_SENSOR_CONTROL, &control_temp) == ESP_OK) {
+            response[offset++] = (control_temp >> 8) & 0xFF;
+            response[offset++] = control_temp & 0xFF;
+        } else {
+            response[offset++] = 0x80;  // 无效温度标记
+            response[offset++] = 0x00;
+        }
+
+        // 4. 电流数据
+        current_sensor_data_t current_data;
+        if (adc128s102_get_latest_data(&current_data) == ESP_OK) {
+            // 4.1 总输入电流 (float, 4字节, IEEE 754, A)
+            union { float f; uint32_t u; } total_current_union;
+            total_current_union.f = current_data.total_input_current;
+            response[offset++] = (total_current_union.u >> 24) & 0xFF;
+            response[offset++] = (total_current_union.u >> 16) & 0xFF;
+            response[offset++] = (total_current_union.u >> 8) & 0xFF;
+            response[offset++] = total_current_union.u & 0xFF;
+
+            // 4.2 各通道电流 (6 x float = 24字节)
+            for (int i = 0; i < 6; i++) {
+                union { float f; uint32_t u; } channel_current_union;
+                channel_current_union.f = current_data.channel_currents[i];
+                response[offset++] = (channel_current_union.u >> 24) & 0xFF;
+                response[offset++] = (channel_current_union.u >> 16) & 0xFF;
+                response[offset++] = (channel_current_union.u >> 8) & 0xFF;
+                response[offset++] = channel_current_union.u & 0xFF;
+            }
+        } else {
+            // 填充无效电流数据 (28字节)
+            for (int i = 0; i < 28; i++) {
+                response[offset++] = 0xFF;
+            }
+        }
+
+        // 5. 系统状态标志
+        uint8_t status_flags = 0;
+
+        // 热保护状态
+        if (power_mgr_is_thermal_protection_active()) {
+            status_flags |= 0x01;  // bit0: 热保护中
+        }
+
+        // 温度数据有效性
+        int16_t power_temp_check, control_temp_check;
+        bool temp_valid = false;
+        if (temp_mgr_sample_once(TEMP_SENSOR_POWER, &power_temp_check) == ESP_OK &&
+            temp_mgr_sample_once(TEMP_SENSOR_CONTROL, &control_temp_check) == ESP_OK) {
+            status_flags |= 0x02;  // bit1: 温度数据有效
+            temp_valid = true;
+        }
+
+        // 电流数据有效性
+        if (adc128s102_get_latest_data(&current_data) == ESP_OK) {
+            status_flags |= 0x04;  // bit2: 电流数据有效
+        }
+
+        // 校准状态 (需要检查ADC是否已校准)
+        bool calibration_valid = true;  // TODO: 实现真正的校准状态检查
+        if (calibration_valid) {
+            status_flags |= 0x08;  // bit3: 校准状态
+        }
+
+        // 外设电源状态
+        if (power_mgr_external_power_is_on()) {
+            status_flags |= 0x10;  // bit4: 外设电源开启
+        }
+
+        response[offset++] = status_flags;
+
+        // 6. 保留字节
+        response[offset++] = 0x00;
+
+        // 确保我们返回了36字节
+        if (offset != 36) {
+            ESP_LOGE(TAG, "Monitoring data size mismatch: expected 36, got %d", offset);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        int rc = os_mbuf_append(ctxt->om, response, sizeof(response));
+        return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return BLE_ATT_ERR_READ_NOT_PERMITTED;
 }
 
 void adc128s102_ble_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool enabled) {

@@ -19,11 +19,16 @@
 #include "command_codec.h"
 #include "led_status.h"
 #include "power_mgr.h"
+#include "adc128s102.h"
 
 static const char *TAG = "ble";
 
 static int chr_power_mgmt_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     return power_mgr_ble_access(conn_handle, attr_handle, ctxt);
+}
+
+static int chr_monitoring_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    return adc128s102_ble_access(conn_handle, attr_handle, ctxt);
 }
 
 
@@ -32,14 +37,80 @@ static const ble_uuid128_t UUID_SERVICE = BLE_UUID128_INIT(0x11,0x9b,0x5f,0x1b,0
 static const ble_uuid16_t UUID_CH_STATE   = BLE_UUID16_INIT(0xFFF0);
 static const ble_uuid16_t UUID_CH_CONTROL = BLE_UUID16_INIT(0xFFF1);
 static const ble_uuid16_t UUID_CH_POWER_MGMT   = BLE_UUID16_INIT(0xFFF5);
+static const ble_uuid16_t UUID_CH_MONITORING = BLE_UUID16_INIT(0xFFF6);
 
 static uint16_t s_state_val_handle;
+static uint16_t s_control_val_handle;
+static uint16_t s_power_mgmt_val_handle;
+static uint16_t s_monitoring_val_handle;
+
+// Channel state notification management
+static bool s_state_notifications_enabled = false;
+static uint16_t s_state_conn_handle = 0;
+static uint16_t s_state_attr_handle = 0;
+
+// Store previous states to detect changes
+static uint8_t s_prev_states[6] = {0};
+
+// Function to send channel state notifications
+static void send_state_notification_if_changed(void) {
+    if (!s_state_notifications_enabled || s_state_conn_handle == 0) {
+        return;
+    }
+
+    uint8_t current_states[6];
+    pwm_control_get_states(current_states);
+
+    // Check if any channel state has changed
+    bool changed = false;
+    for (int i = 0; i < 6; i++) {
+        if (current_states[i] != s_prev_states[i]) {
+            changed = true;
+            break;
+        }
+    }
+
+    if (changed) {
+        // Update previous states
+        memcpy(s_prev_states, current_states, sizeof(s_prev_states));
+
+        // Prepare notification data
+        struct os_mbuf *om = ble_hs_mbuf_att_pkt();
+        if (!om) {
+            ESP_LOGW(TAG, "Failed to allocate mbuf for state notification");
+            return;
+        }
+
+        int rc = os_mbuf_append(om, current_states, sizeof(current_states));
+        if (rc != 0) {
+            ESP_LOGW(TAG, "Failed to append state data to mbuf: %d", rc);
+            os_mbuf_free_chain(om);
+            return;
+        }
+
+        // Send notification
+        rc = ble_gatts_notify_custom(s_state_conn_handle, s_state_val_handle, om);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "Failed to send state notification: %d", rc);
+            os_mbuf_free_chain(om);
+            return;
+        }
+
+        ESP_LOGI(TAG, "Sent CH_STATE notification (6 bytes): [%02X,%02X,%02X,%02X,%02X,%02X]",
+                 current_states[0], current_states[1], current_states[2],
+                 current_states[3], current_states[4], current_states[5]);
+    }
+}
 
 // Read and write access callbacks
 static int chr_state_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         uint8_t states[6];  // 支持6个通道
         pwm_control_get_states(states);
+
+        // Update cached states for change detection
+        memcpy(s_prev_states, states, sizeof(s_prev_states));
+
         int rc = os_mbuf_append(ctxt->om, states, sizeof(states));
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
@@ -96,18 +167,26 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             {
                 .uuid = &UUID_CH_STATE.u,
                 .access_cb = chr_state_access,
-                .flags = BLE_GATT_CHR_F_READ,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &s_state_val_handle,
             },
             {
                 .uuid = &UUID_CH_CONTROL.u,
                 .access_cb = chr_control_access,
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+                .val_handle = &s_control_val_handle,
             },
                     {
                 .uuid = &UUID_CH_POWER_MGMT.u,
                 .access_cb = chr_power_mgmt_access,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+                .val_handle = &s_power_mgmt_val_handle,
+            },
+            {
+                .uuid = &UUID_CH_MONITORING.u,
+                .access_cb = chr_monitoring_access,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &s_monitoring_val_handle,
             },
             { 0 }
         },
@@ -235,16 +314,45 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         ESP_LOGI(TAG, "GAP disconnect reason=%d; restart advertising", event->disconnect.reason);
         led_status_set_bluetooth_connected(false);
         power_mgr_ble_subscribe(BLE_HS_CONN_HANDLE_NONE, 0, false);
+
+        // Reset channel state notification state
+        s_state_notifications_enabled = false;
+        s_state_conn_handle = 0;
+        s_state_attr_handle = 0;
+
         start_advertise();
         return 0;
     case BLE_GAP_EVENT_SUBSCRIBE:
-        ESP_LOGI(TAG, "Subscribe event conn=%d attr=%d cur_notify=%d", 
-                 event->subscribe.conn_handle, 
-                 event->subscribe.attr_handle, 
+        ESP_LOGI(TAG, "Subscribe event conn=%d attr=%d cur_notify=%d",
+                 event->subscribe.conn_handle,
+                 event->subscribe.attr_handle,
                  event->subscribe.cur_notify);
-        power_mgr_ble_subscribe(event->subscribe.conn_handle,
-                                event->subscribe.attr_handle,
-                                event->subscribe.cur_notify);
+
+        // Handle channel state subscriptions
+        if (event->subscribe.attr_handle == s_state_val_handle) {
+            s_state_notifications_enabled = event->subscribe.cur_notify;
+            s_state_conn_handle = event->subscribe.conn_handle;
+            s_state_attr_handle = event->subscribe.attr_handle;
+            ESP_LOGI(TAG, "Channel state notifications %s (conn=%u, handle=%u)",
+                     s_state_notifications_enabled ? "enabled" : "disabled",
+                     event->subscribe.conn_handle, event->subscribe.attr_handle);
+        }
+        // Handle monitoring subscriptions
+        else if (event->subscribe.attr_handle == s_monitoring_val_handle) {
+            adc128s102_ble_subscribe(event->subscribe.conn_handle,
+                                     event->subscribe.attr_handle,
+                                     event->subscribe.cur_notify);
+            ESP_LOGI(TAG, "Monitoring subscription handled (conn=%u, handle=%u)",
+                     event->subscribe.conn_handle, event->subscribe.attr_handle);
+        }
+        // Handle power management subscriptions (now config only, no notifications)
+        else if (event->subscribe.attr_handle == s_power_mgmt_val_handle) {
+            ESP_LOGW(TAG, "Power management feature no longer supports notifications (conn=%u, handle=%u)",
+                     event->subscribe.conn_handle, event->subscribe.attr_handle);
+        }
+        else {
+            ESP_LOGW(TAG, "Unknown subscription handle: %u", event->subscribe.attr_handle);
+        }
         return 0;
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGI(TAG, "Advertising complete reason=%d, restarting", event->adv_complete.reason);
@@ -276,6 +384,10 @@ static void ble_on_sync(void) {
 static void ble_host_task(void *param) {
     nimble_port_run();
     nimble_port_freertos_deinit();
+}
+
+void ble_server_check_state_notifications(void) {
+    send_state_notification_if_changed();
 }
 
 esp_err_t ble_server_init(void) {

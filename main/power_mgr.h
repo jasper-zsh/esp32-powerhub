@@ -26,6 +26,7 @@ bool power_mgr_external_power_is_on(void);
 
 // 温度相关接口
 esp_err_t power_mgr_get_temperature(int16_t *out_temp);  // 兼容性接口，返回控制区域温度
+esp_err_t power_mgr_get_latest_temp(int16_t *out_temp); // 获取最新温度读数
 esp_err_t power_mgr_set_temp_thresholds(int16_t high_temp, int16_t recover_temp);
 esp_err_t power_mgr_get_temp_thresholds(int16_t *high_temp, int16_t *recover_temp);
 bool power_mgr_is_thermal_protection_active(void);
