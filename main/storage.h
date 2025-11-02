@@ -11,11 +11,11 @@ extern "C" {
 #define STORAGE_KEY_STATES "ch_state"
 #define STORAGE_KEY_PRESET_PREFIX "preset_"
 
-// Read 4-byte states from NVS. If not found, fills zeros.
-esp_err_t storage_read_states(uint8_t out_states[4]);
+// Read 6-byte states from NVS. If not found, fills zeros.
+esp_err_t storage_read_states(uint8_t out_states[6]);
 
-// Write 4-byte states to NVS.
-esp_err_t storage_write_states(const uint8_t states[4]);
+// Write 6-byte states to NVS.
+esp_err_t storage_write_states(const uint8_t states[6]);
 
 // Save a preset blob under preset_<id> key.
 esp_err_t storage_save_preset(uint8_t preset_id, const uint8_t *data, size_t len);

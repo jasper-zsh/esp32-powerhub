@@ -42,7 +42,7 @@ static uint16_t s_state_val_handle;
 // Read and write access callbacks
 static int chr_state_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        uint8_t states[4];
+        uint8_t states[6];  // 支持6个通道
         pwm_control_get_states(states);
         int rc = os_mbuf_append(ctxt->om, states, sizeof(states));
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;

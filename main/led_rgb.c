@@ -7,7 +7,7 @@
 
 static const char *TAG = "led_rgb";
 
-#define WS2812_LED_GPIO 21
+#define WS2812_LED_GPIO 8
 #define RMT_CHANNEL_CLK_HZ 10000000 // 10MHz resolution, 100ns tick
 
 // WS2812 timing constants
@@ -51,7 +51,7 @@ static void ws2812_rmt_adapter(uint8_t red, uint8_t green, uint8_t blue, rmt_sym
 esp_err_t led_rgb_init(void) {
     ESP_LOGI(TAG, "Initializing WS2812 LED on GPIO %d", WS2812_LED_GPIO);
     
-    // Initialize RMT TX channel
+    // Initialize RMT TX channel - explicitly use channel 0 for LED
     rmt_tx_channel_config_t tx_chan_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .gpio_num = WS2812_LED_GPIO,
@@ -59,6 +59,9 @@ esp_err_t led_rgb_init(void) {
         .resolution_hz = RMT_CHANNEL_CLK_HZ,
         .trans_queue_depth = 4,
         .flags.with_dma = false,
+        .flags.invert_out = 0,
+        .flags.io_loop_back = 0,
+        .flags.io_od_mode = 0,
     };
     
     esp_err_t err = rmt_new_tx_channel(&tx_chan_config, &s_led_channel);

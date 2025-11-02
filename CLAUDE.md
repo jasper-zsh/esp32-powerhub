@@ -1,16 +1,16 @@
 # Hardware Definition
-This project use ESP32S3 micro controller with following parts:
+This project use ESP32C6 micro controller with following parts:
 
 ## 外设电源
-GPIO1控制所有外设的电源，唤醒时先将GPIO1设置为高电平输出以使所有外设上电；睡眠前将GPIO1设置为低电平以节省功耗。
+GPIO0控制所有外设的电源，唤醒时先将GPIO0设置为高电平输出以使所有外设上电；睡眠前将GPIO0设置为低电平以节省功耗。
 
 ## ADC128S102和电流传感器
 通过SPI连接了一个外置ADC以读取电流数据。
 MCU上的连接情况如下：
-- GPIO3为CS
-- GPIO4为SCLK
-- GPIO5为MISO
-- GPIO6为MOSI
+- GPIO2为CS
+- GPIO3为SCLK
+- GPIO4为MISO
+- GPIO5为MOSI
 
 ADC128S102各个通道连接情况如下：
 - IN0: 一个ACS758用于读取总输入电流
@@ -18,19 +18,19 @@ ADC128S102各个通道连接情况如下：
 
 
 ## PWM Channel
-6 PWM Channels CH1/2/3/4/5/6 on GPIO8/9/10/11/12/13
+6 PWM Channels CH1/2/3/4/5/6 on GPIO21/20/19/18/15/14
 
 Each channel can work in switch mode and PWM mode.
 In switch mode, high level means ON, hi-res means OFF.
 
 ## WS2812 RGB LED
-Connected on GPIO21.
+Connected on GPIO8.
 
 ## 电源电压探针
-GPIO2上连接了一个分压电阻，使用ADC读取可以获得电源电压
+GPIO1上连接了一个分压电阻，使用ADC读取可以获得电源电压
 
 ## Temperature sensor DS18B20
-Two DS18B20 are connected to GPIO7, one for power area, one for control area.
+Two DS18B20 are connected to GPIO22, one for power area, one for control area.
 
 # Documents
 Documents are divided into multiple folders in `versions` folder, like `versions/001.init`.

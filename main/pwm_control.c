@@ -8,12 +8,13 @@
 
 static const char *TAG = "pwm";
 
-// GPIO mapping
-static const int s_gpio[PWM_CHANNEL_COUNT] = {7, 8, 9, 10};
+// GPIO mapping (严格按照硬件定义)
+// CH1-6 使用 GPIO 21,20,19,18,15,14
+static const int s_gpio[PWM_CHANNEL_COUNT] = {21, 20, 19, 18, 15, 14};
 
 // LEDC channels mapping
 static const ledc_channel_t s_ledc_ch[PWM_CHANNEL_COUNT] = {
-    LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_CHANNEL_2, LEDC_CHANNEL_3
+    LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_CHANNEL_2, LEDC_CHANNEL_3, LEDC_CHANNEL_4, LEDC_CHANNEL_5
 };
 
 // ESP32-S3 exposes PWM via low speed group only; keep 5 kHz timer per design

@@ -1,4 +1,4 @@
-// PWM and GPIO control for 4 channels on ESP32-S3
+// PWM and GPIO control for 6 channels on ESP32-C6
 #pragma once
 
 #include <stdint.h>
@@ -9,14 +9,16 @@
 extern "C" {
 #endif
 
-#define PWM_CHANNEL_COUNT 4
+#define PWM_CHANNEL_COUNT 6
 
-// Fixed mapping per design: CH1..CH4 -> GPIO7/8/9/10
+// Fixed mapping per design: CH1..CH6 -> GPIO8/9/10/11/12/13
 typedef enum {
     CH1 = 0,
     CH2 = 1,
     CH3 = 2,
     CH4 = 3,
+    CH5 = 4,
+    CH6 = 5,
 } pwm_channel_t;
 
 // Initialize LEDC timer + channels and configure GPIOs.
