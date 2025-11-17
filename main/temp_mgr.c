@@ -8,8 +8,8 @@
 
 static const char *TAG = "temp_mgr";
 
-// DS18B20引脚定义 - 根据最新硬件定义，两个DS18B20连接到GPIO7
-#define DS18B20_DQ_GPIO     GPIO_NUM_7
+// DS18B20引脚定义 - 根据最新硬件定义，两个DS18B20连接到同一GPIO
+#define DS18B20_DQ_GPIO     ((gpio_num_t)TEMP_SENSOR_GPIO_NUM)
 static bool temp_mgr_initialized = false;
 
 static onewire_gpio_bus_handle_t bus = NULL;
@@ -24,11 +24,11 @@ esp_err_t temp_mgr_init(void) {
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Initializing DS18B20 temperature sensors using GPIO bit-bang on GPIO%d", DS18B20_DQ_GPIO);
+    ESP_LOGI(TAG, "Initializing DS18B20 temperature sensors using GPIO bit-bang on GPIO%d", TEMP_SENSOR_GPIO_NUM);
 
     // 初始化1-Wire GPIO总线
     ESP_LOGI(TAG, "Creating 1-Wire GPIO bus for DS18B20");
-    ESP_LOGI(TAG, "GPIO%d configuration: internal pull-up disabled, external 4.7kΩ pull-up required", DS18B20_DQ_GPIO);
+    ESP_LOGI(TAG, "GPIO%d configuration: internal pull-up disabled, external 4.7kΩ pull-up required", TEMP_SENSOR_GPIO_NUM);
 
     onewire_gpio_config_t bus_config = {
         .gpio_num = DS18B20_DQ_GPIO,
@@ -38,11 +38,11 @@ esp_err_t temp_mgr_init(void) {
     esp_err_t ret = onewire_gpio_new_bus(&bus_config, &bus);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create 1-Wire GPIO bus: %s", esp_err_to_name(ret));
-        ESP_LOGE(TAG, "Check GPIO%d wiring and external pull-up resistor (4.7kΩ recommended)", DS18B20_DQ_GPIO);
+        ESP_LOGE(TAG, "Check GPIO%d wiring and external pull-up resistor (4.7kΩ recommended)", TEMP_SENSOR_GPIO_NUM);
         ESP_LOGE(TAG, "This GPIO implementation avoids RMT channel conflicts with LED");
         return ret;
     }
-    ESP_LOGI(TAG, "1-Wire GPIO bus successfully created on GPIO%d", DS18B20_DQ_GPIO);
+    ESP_LOGI(TAG, "1-Wire GPIO bus successfully created on GPIO%d", TEMP_SENSOR_GPIO_NUM);
 
     // 等待总线稳定
     ESP_LOGD(TAG, "Waiting for 1-Wire bus to stabilize...");
@@ -140,8 +140,8 @@ esp_err_t temp_mgr_init(void) {
             if (retry_count < max_retries) {
                 ESP_LOGW(TAG, "No DS18B20 sensors found, retrying in 500ms...");
                 ESP_LOGW(TAG, "Troubleshooting tips:");
-                ESP_LOGW(TAG, "  1. Check GPIO%d connection to DS18B20 data line", DS18B20_DQ_GPIO);
-                ESP_LOGW(TAG, "  2. Verify 4.7kΩ pull-up resistor between GPIO%d and VCC", DS18B20_DQ_GPIO);
+                ESP_LOGW(TAG, "  1. Check GPIO%d connection to DS18B20 data line", TEMP_SENSOR_GPIO_NUM);
+                ESP_LOGW(TAG, "  2. Verify 4.7kΩ pull-up resistor between GPIO%d and VCC", TEMP_SENSOR_GPIO_NUM);
                 ESP_LOGW(TAG, "  3. Ensure DS18B20 is powered (VCC connected to 3.3V)");
                 ESP_LOGW(TAG, "  4. Check for loose connections or short circuits");
                 vTaskDelay(pdMS_TO_TICKS(500));
@@ -153,7 +153,7 @@ esp_err_t temp_mgr_init(void) {
 
     if (sensor_count == 0) {
         ESP_LOGW(TAG, "No DS18B20 sensors found after %d attempts", max_retries);
-        ESP_LOGW(TAG, "This is normal if no sensors are connected to GPIO%d", DS18B20_DQ_GPIO);
+        ESP_LOGW(TAG, "This is normal if no sensors are connected to GPIO%d", TEMP_SENSOR_GPIO_NUM);
         // 清理资源
         if (bus) {
             onewire_gpio_del_bus(bus);

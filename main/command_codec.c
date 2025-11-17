@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "pwm_control.h"
+#include "hardware_defs.h"
 
 #define CONTROL_MAX_CHANNEL PWM_CHANNEL_COUNT
 

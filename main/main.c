@@ -317,7 +317,7 @@ static esp_err_t init_temperature_manager(void) {
     // 注意：这个初始化已经在power_mgr_init中调用
     // 这里只做状态检查，因为实际的temp_mgr_init()由power_mgr控制
     g_subsys_status.temp_mgr_initialized = true;
-    ESP_LOGI(TAG, "✓ Temperature manager initialized (GPIO7 - DS18B20)");
+    ESP_LOGI(TAG, "✓ Temperature manager initialized (GPIO%d - %d x DS18B20)", TEMP_SENSOR_GPIO_NUM, TEMP_SENSOR_COUNT);
 
     return ESP_OK;
 }

@@ -299,7 +299,7 @@ static void monitor_task(void *arg) {
     int temp_sensor_count = temp_mgr_get_sensor_count();
     ESP_LOGI(TAG, "Temperature sensors found: %d", temp_sensor_count);
     if (temp_sensor_count == 0) {
-        ESP_LOGW(TAG, "No DS18B20 temperature sensors found on GPIO7");
+        ESP_LOGW(TAG, "No DS18B20 temperature sensors found on GPIO%d", TEMP_SENSOR_GPIO_NUM);
         ESP_LOGW(TAG, "Temperature monitoring will show default values until sensors are connected");
         ESP_LOGW(TAG, "To fix: Check 4.7kΩ pull-up resistor and sensor connections");
     } else {
@@ -368,7 +368,7 @@ static void monitor_task(void *arg) {
                 // 检查是否是因为没有传感器
                 int sensor_count = temp_mgr_get_sensor_count();
                 if (sensor_count == 0) {
-                    ESP_LOGD(TAG, "No temperature sensors connected (GPIO7)");
+                    ESP_LOGD(TAG, "No temperature sensors connected (GPIO%d)", TEMP_SENSOR_GPIO_NUM);
                     // 设置为指示没有传感器的特殊值
                     s_state.last_power_temp = -273.0f;  // 绝对零度表示无传感器
                     s_state.last_control_temp = -273.0f;

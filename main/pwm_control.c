@@ -8,10 +8,6 @@
 
 static const char *TAG = "pwm";
 
-// GPIO mapping (根据最新硬件定义更新)
-// CH1-6 使用 GPIO 8,9,10,11,12,13
-static const int s_gpio[PWM_CHANNEL_COUNT] = {8, 9, 10, 11, 12, 13};
-
 // LEDC channels mapping
 static const ledc_channel_t s_ledc_ch[PWM_CHANNEL_COUNT] = {
     LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_CHANNEL_2, LEDC_CHANNEL_3, LEDC_CHANNEL_4, LEDC_CHANNEL_5
@@ -177,7 +173,7 @@ esp_err_t pwm_control_init(void) {
     for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
         s_states[i] = 0;
         ledc_channel_config_t ch = {
-            .gpio_num = s_gpio[i],
+            .gpio_num = PWM_CHANNEL_GPIOS[i],
             .speed_mode = s_mode,
             .channel = s_ledc_ch[i],
             .intr_type = LEDC_INTR_DISABLE,

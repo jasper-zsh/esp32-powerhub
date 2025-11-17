@@ -5,14 +5,15 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
+#include "hardware_defs.h"
+
 // 最大支持的DS18B20传感器数量
-#define TEMP_MGR_MAX_SENSORS    2
+#define TEMP_MGR_MAX_SENSORS    TEMP_SENSOR_COUNT
 
 // 温度传感器类型
 typedef enum {
     TEMP_SENSOR_POWER = 0,    // 电源区域温度传感器
     TEMP_SENSOR_CONTROL = 1,  // 控制区域温度传感器
-    TEMP_SENSOR_COUNT = 2
 } temp_sensor_type_t;
 
 // 温度管理器初始化

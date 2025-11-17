@@ -5,11 +5,11 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
+#include "hardware_defs.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define PWM_CHANNEL_COUNT 6
 
 // Fixed mapping per latest hardware design: CH1..CH6 -> GPIO8/9/10/11/12/13
 typedef enum {
