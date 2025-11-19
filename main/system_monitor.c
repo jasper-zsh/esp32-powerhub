@@ -7,7 +7,7 @@
 #include "esp_timer.h"
 
 #include "power_mgr.h"
-#include "adc128s102.h"
+#include "current_sensor.h"
 #include "temp_mgr.h"
 
 static const char *TAG = "system_monitor";
@@ -288,7 +288,7 @@ static void monitor_task(void *arg) {
     vTaskDelay(pdMS_TO_TICKS(100));  // 等待100ms确保ADC初始化完成
 
     current_sensor_data_t test_current;
-    esp_err_t current_ret = adc128s102_get_latest_data(&test_current);
+    esp_err_t current_ret = current_sensor_get_latest(&test_current);
     if (current_ret == ESP_OK) {
         ESP_LOGI(TAG, "✓ Current test: Total=%.3fA", test_current.total_input_current);
     } else {
@@ -334,7 +334,7 @@ static void monitor_task(void *arg) {
         // 电流监控
         if (current_time - last_current_check >= s_config.current_monitor_interval) {
             current_sensor_data_t current_data;
-            esp_err_t current_ret = adc128s102_get_latest_data(&current_data);
+            esp_err_t current_ret = current_sensor_get_latest(&current_data);
             if (current_ret == ESP_OK) {
                 s_state.last_total_current = current_data.total_input_current;
                 memcpy(s_state.last_channel_currents, current_data.channel_currents,

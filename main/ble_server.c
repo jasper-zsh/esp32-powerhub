@@ -19,7 +19,7 @@
 #include "command_codec.h"
 #include "led_status.h"
 #include "power_mgr.h"
-#include "adc128s102.h"
+#include "current_sensor.h"
 
 static const char *TAG = "ble";
 
@@ -28,7 +28,7 @@ static int chr_power_mgmt_access(uint16_t conn_handle, uint16_t attr_handle, str
 }
 
 static int chr_monitoring_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    return adc128s102_ble_access(conn_handle, attr_handle, ctxt);
+    return current_sensor_ble_access(conn_handle, attr_handle, ctxt);
 }
 
 
@@ -339,9 +339,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         }
         // Handle monitoring subscriptions
         else if (event->subscribe.attr_handle == s_monitoring_val_handle) {
-            adc128s102_ble_subscribe(event->subscribe.conn_handle,
-                                     event->subscribe.attr_handle,
-                                     event->subscribe.cur_notify);
+            current_sensor_ble_subscribe(event->subscribe.conn_handle,
+                                         event->subscribe.attr_handle,
+                                         event->subscribe.cur_notify);
             ESP_LOGI(TAG, "Monitoring subscription handled (conn=%u, handle=%u)",
                      event->subscribe.conn_handle, event->subscribe.attr_handle);
         }

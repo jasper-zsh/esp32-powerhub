@@ -13,7 +13,7 @@
 #include "scheduler.h"
 #include "led_status.h"
 #include "power_mgr.h"
-#include "adc128s102.h"
+#include "current_sensor.h"
 #include "temp_mgr.h"
 #include "led_rgb.h"
 #include "system_monitor.h"
@@ -32,10 +32,10 @@ typedef struct {
     bool power_mgr_initialized;
     bool temp_mgr_initialized;
     bool pwm_control_initialized;
-    bool adc128s102_initialized;
+    bool current_sensor_initialized;
       bool scheduler_initialized;
     bool ble_server_initialized;
-    bool adc_sampling_started;
+    bool current_sampling_started;
     bool system_monitor_initialized;
     bool system_monitor_started;
 } subsystem_status_t;
@@ -50,7 +50,7 @@ static esp_err_t init_led_status(void);
 static esp_err_t init_power_manager(void);
 static esp_err_t init_temperature_manager(void);
 static esp_err_t init_pwm_controller(void);
-static esp_err_t init_adc128s102(void);
+static esp_err_t init_current_sensor(void);
 static esp_err_t init_scheduler(void);
 static esp_err_t init_ble_server(void);
 static esp_err_t start_adc_sampling(void);
@@ -59,7 +59,7 @@ static esp_err_t start_system_monitor(void);
 
 void app_main(void) {
     // 设置调试日志级别
-    esp_log_level_set("adc128s102", ESP_LOG_DEBUG);
+    esp_log_level_set("current_sensor", ESP_LOG_DEBUG);
     esp_log_level_set("app", ESP_LOG_DEBUG);
 
     // 检查重启原因
@@ -148,7 +148,7 @@ void app_main(void) {
     }
 
     // 9. 初始化ADC128S102 (电流监测)
-    ret = init_adc128s102();
+    ret = init_current_sensor();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ADC128S102 initialization failed");
         // 继续执行，但电流监测不可用
@@ -199,12 +199,12 @@ void app_main(void) {
         ESP_LOGD(TAG, "Main task running... All subsystems operational");
 
         // 可以在这里添加系统状态检查
-        ESP_LOGD(TAG, "Subsystem Status: NVS=%d, Power=%d, LED=%d, PWM=%d, ADC=%d, BLE=%d",
+        ESP_LOGD(TAG, "Subsystem Status: NVS=%d, Power=%d, LED=%d, PWM=%d, CUR=%d, BLE=%d",
                  g_subsys_status.nvs_initialized,
                  g_subsys_status.power_mgr_initialized,
                  g_subsys_status.led_status_initialized,
                  g_subsys_status.pwm_control_initialized,
-                 g_subsys_status.adc128s102_initialized,
+                 g_subsys_status.current_sensor_initialized,
                  g_subsys_status.ble_server_initialized);
     }
 }
@@ -342,18 +342,17 @@ static esp_err_t init_pwm_controller(void) {
 
 
 /**
- * @brief 初始化ADC128S102
- * @note 外置ADC，GPIO3-6 (SPI)，用于电流监测
+ * @brief 初始化电流传感器抽象层
  */
-static esp_err_t init_adc128s102(void) {
-    ESP_LOGI(TAG, "[8/12] Initializing ADC128S102...");
+static esp_err_t init_current_sensor(void) {
+    ESP_LOGI(TAG, "[8/12] Initializing current sensor subsystem...");
 
-    esp_err_t ret = adc128s102_init();
+    esp_err_t ret = current_sensor_init();
     if (ret == ESP_OK) {
-        g_subsys_status.adc128s102_initialized = true;
-        ESP_LOGI(TAG, "✓ ADC128S102 initialized (SPI: GPIO3-6)");
+        g_subsys_status.current_sensor_initialized = true;
+        ESP_LOGI(TAG, "✓ Current sensor subsystem initialized");
     } else {
-        ESP_LOGE(TAG, "✗ ADC128S102 initialization failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "✗ Current sensor initialization failed: %s", esp_err_to_name(ret));
     }
 
     return ret;
@@ -480,23 +479,23 @@ static esp_err_t start_system_monitor(void) {
 }
 
 /**
- * @brief 启动ADC采样
+ * @brief 启动电流采样
  * @note 开始连续电流数据采集
  */
 static esp_err_t start_adc_sampling(void) {
-    ESP_LOGI(TAG, "[12/13] Starting ADC sampling...");
+    ESP_LOGI(TAG, "[12/13] Starting current sampling...");
 
     esp_err_t ret = ESP_OK;
-    if (g_subsys_status.adc128s102_initialized) {
-        ret = adc128s102_start_continuous_sampling(1000); // 1秒间隔
+    if (g_subsys_status.current_sensor_initialized) {
+        ret = current_sensor_start(1000); // 1秒间隔
         if (ret == ESP_OK) {
-            g_subsys_status.adc_sampling_started = true;
-            ESP_LOGI(TAG, "✓ ADC sampling started (1s interval)");
+            g_subsys_status.current_sampling_started = true;
+            ESP_LOGI(TAG, "✓ Current sampling started (1s interval)");
         } else {
-            ESP_LOGE(TAG, "✗ ADC sampling start failed: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "✗ Current sampling start failed: %s", esp_err_to_name(ret));
         }
     } else {
-        ESP_LOGW(TAG, "ADC128S102 not initialized, skipping sampling start");
+        ESP_LOGW(TAG, "Current sensor subsystem not initialized, skipping sampling start");
         ret = ESP_ERR_NOT_FOUND;
     }
 

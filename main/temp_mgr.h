@@ -7,6 +7,10 @@
 
 #include "hardware_defs.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // 最大支持的DS18B20传感器数量
 #define TEMP_MGR_MAX_SENSORS    TEMP_SENSOR_COUNT
 
@@ -30,5 +34,9 @@ int temp_mgr_get_sensor_count(void);
 
 // 关闭温度传感器（用于深度睡眠前）
 void temp_mgr_deinit(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // TEMP_MGR_H
