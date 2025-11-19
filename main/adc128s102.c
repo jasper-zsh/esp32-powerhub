@@ -12,16 +12,17 @@
 #include "host/ble_hs.h"
 #include "power_mgr.h"
 #include "temp_mgr.h"
+#include "hardware_defs.h"
 
 struct ble_gatt_access_ctxt;
 
 static const char *TAG = "adc128s102";
 
-// SPI配置 - 根据最新硬件定义更新
-#define ADC_CS_PIN               3   // GPIO3 (CS)
-#define ADC_SCLK_PIN             4   // GPIO4 (SCLK)
-#define ADC_MISO_PIN             5   // GPIO5 (MISO)
-#define ADC_MOSI_PIN             6   // GPIO6 (MOSI)
+// SPI配置 - 使用hardware_defs.h中的定义
+#define ADC_CS_PIN               EXTERNAL_ADC_CS_PIN
+#define ADC_SCLK_PIN             EXTERNAL_ADC_SCLK_PIN
+#define ADC_MISO_PIN             EXTERNAL_ADC_MISO_PIN
+#define ADC_MOSI_PIN             EXTERNAL_ADC_MOSI_PIN
 
 // SPI主机配置
 #define ADC_SPI_HOST             SPI2_HOST
@@ -31,13 +32,8 @@ static const char *TAG = "adc128s102";
 #define ADC_RESOLUTION           4096.0f  // 12位ADC
 #define ADC_VREF                 5.0f     // 5V参考电压
 
-// ACS758参数 (100A版本) - 注意：值越小电流越大（反向关系）
-#define ACS758_DEFAULT_OFFSET    2.5f     // V (零电流偏置)
-#define ACS758_DEFAULT_SENSITIVITY 0.020f // V/A (20mV/A) - 反向特性
-
-// ACS712参数 (20A版本)
-#define ACS712_DEFAULT_OFFSET    2.5f     // V (零电流偏置)
-#define ACS712_DEFAULT_SENSITIVITY 0.100f // V/A (100mV/A)
+// ACS758参数 - 使用hardware_defs.h中的定义
+// ACS712参数 - 使用hardware_defs.h中的定义
 
 // 全局变量
 static spi_device_handle_t s_spi_handle = NULL;
@@ -45,10 +41,10 @@ static TaskHandle_t s_sampling_task_handle = NULL;
 static current_sensor_data_t s_latest_data = {0};
 static SemaphoreHandle_t s_data_mutex = NULL;
 static adc_calibration_t s_calibration = {
-    .acs758_offset = ACS758_DEFAULT_OFFSET,
-    .acs758_sensitivity = ACS758_DEFAULT_SENSITIVITY,
-    .acs712_offset = ACS712_DEFAULT_OFFSET,
-    .acs712_sensitivity = ACS712_DEFAULT_SENSITIVITY
+    .acs758_offset = TOTAL_CURRENT_OFFSET,
+    .acs758_sensitivity = TOTAL_CURRENT_SENSITIVITY,
+    .acs712_offset = CHANNEL_CURRENT_OFFSET,
+    .acs712_sensitivity = CHANNEL_CURRENT_SENSITIVITY
 };
 
 
@@ -207,7 +203,7 @@ static esp_err_t adc128s102_read_all_channels_continuous(uint16_t *channel_value
     // frame 7 接收的是通道6的结果
 
     // 需要重新排列数据
-    uint16_t temp_values[8];
+    uint16_t temp_values[ADC128S102_CHANNEL_COUNT];
     temp_values[0] = channel_values[1];  // 通道0的结果在frame 1
     temp_values[1] = channel_values[2];  // 通道1的结果在frame 2
     temp_values[2] = channel_values[3];  // 通道2的结果在frame 3
@@ -218,7 +214,7 @@ static esp_err_t adc128s102_read_all_channels_continuous(uint16_t *channel_value
     temp_values[7] = 0;                  // 通道7的结果需要下一次读取
 
     ESP_LOGI(TAG, "ADC CONTINUOUS: Channel mapping after pipeline correction:");
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < ADC128S102_CHANNEL_COUNT - 1; i++) {
         ESP_LOGI(TAG, "  Channel %d: raw=%d", i, temp_values[i]);
     }
 
@@ -303,97 +299,89 @@ esp_err_t adc128s102_read_current(uint8_t channel, float *current) {
     return ESP_OK;
 }
 
-// 批量读取所有电流数据 - 使用连续多frame读取方法
+// 批量读取所有电流数据 - 自适应传感器配置
 esp_err_t adc128s102_read_all_currents(current_sensor_data_t *data) {
     if (!data) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "ADC BATCH: Starting continuous batch read of all channels");
+    ESP_LOGI(TAG, "ADC BATCH: Starting adaptive batch read of current sensors");
+
+    // 初始化输出数据
+    memset(data, 0, sizeof(current_sensor_data_t));
 
     // 使用连续读取方法一次性获取所有通道的原始数据
-    uint16_t raw_values[8];
+    uint16_t raw_values[ADC128S102_CHANNEL_COUNT];
     esp_err_t ret = adc128s102_read_all_channels_continuous(raw_values);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ADC BATCH: Failed to read all channels continuously");
         return ret;
     }
 
-    // 定义物理通道到逻辑通道的映射关系
-    // 根据硬件定义：
-    // IN0: 总输入电流 (ACS758)
-    // IN1: CH4电流 (ACS712)
-    // IN2: CH3电流 (ACS712)
-    // IN3: CH2电流 (ACS712)
-    // IN4: CH1电流 (ACS712)
-    // IN5: CH5电流 (ACS712)
-    // IN6: CH6电流 (ACS712)
+    ESP_LOGI(TAG, "ADC BATCH: Converting raw values to current (adaptive mode):");
 
-    struct {
-        uint8_t physical_channel;  // 物理IN通道号
-        const char* name;          // 通道名称
-        bool is_acs758;           // 是否为ACS758传感器
-    } channel_mapping[] = {
-        {0, "TOTAL", true},   // IN0 -> 总电流 (ACS758)
-        {1, "CH4", false},    // IN1 -> CH4 (ACS712)
-        {2, "CH3", false},    // IN2 -> CH3 (ACS712)
-        {3, "CH2", false},    // IN3 -> CH2 (ACS712)
-        {4, "CH1", false},    // IN4 -> CH1 (ACS712)
-        {5, "CH5", false},    // IN5 -> CH5 (ACS712)
-        {6, "CH6", false}     // IN6 -> CH6 (ACS712)
-    };
-
-    ESP_LOGI(TAG, "ADC BATCH: Converting raw values to current:");
-
-    // 将原始ADC值转换为电流值
-    float current_values[7];
-    for (int i = 0; i < 7; i++) {
-        uint8_t phys_ch = channel_mapping[i].physical_channel;
-        uint16_t raw_val = raw_values[phys_ch];
-
-        // 根据传感器类型进行转换
+    // 处理总电流传感器（如果存在）
+    if (HAS_TOTAL_CURRENT_SENSOR()) {
+        uint16_t raw_val = raw_values[TOTAL_CURRENT_CH];
         float voltage = (float)raw_val * ADC_VREF / ADC_RESOLUTION;
-        float current = 0.0f;
 
-        if (channel_mapping[i].is_acs758) {
-            // ACS758计算 - 注意：值越小电流越大（反向关系）
-            current = (s_calibration.acs758_offset - voltage) / s_calibration.acs758_sensitivity;
-            ESP_LOGI(TAG, "ADC BATCH: IN%d (%s, ACS758, INVERSE) raw=%d -> voltage=%.3fV -> current=%.3fA (offset=%.3fV, sens=%.3fV/A)",
-                     phys_ch, channel_mapping[i].name, raw_val, voltage, current,
-                     s_calibration.acs758_offset, s_calibration.acs758_sensitivity);
-            ESP_LOGI(TAG, "ADC BATCH: ACS758 formula: current=(%.3f-%.3f)/%.3f",
-                     s_calibration.acs758_offset, voltage, s_calibration.acs758_sensitivity);
-        } else {
-            // ACS712计算 - 正常关系
-            current = (voltage - s_calibration.acs712_offset) / s_calibration.acs712_sensitivity;
-            ESP_LOGI(TAG, "ADC BATCH: IN%d (%s, ACS712, NORMAL) raw=%d -> voltage=%.3fV -> current=%.3fA (offset=%.3fV, sens=%.3fV/A)",
-                     phys_ch, channel_mapping[i].name, raw_val, voltage, current,
-                     s_calibration.acs712_offset, s_calibration.acs712_sensitivity);
-        }
+        // ACS758计算 - 注意：值越小电流越大（反向关系）
+        data->total_input_current = (s_calibration.acs758_offset - voltage) / s_calibration.acs758_sensitivity;
 
-        current_values[i] = current;
+        ESP_LOGI(TAG, "ADC BATCH: Total current (IN%d, ACS758) raw=%d -> voltage=%.3fV -> current=%.3fA",
+                 TOTAL_CURRENT_CH, raw_val, voltage, data->total_input_current);
+    } else {
+        data->total_input_current = 0.0f;
+        ESP_LOGI(TAG, "ADC BATCH: No total current sensor configured");
     }
 
-    // 将数据按逻辑通道顺序映射到输出结构
-    data->total_input_current = current_values[0];  // IN0 -> 总电流
-    data->channel_currents[0] = current_values[4];  // IN4 -> CH1
-    data->channel_currents[1] = current_values[3];  // IN3 -> CH2
-    data->channel_currents[2] = current_values[2];  // IN2 -> CH3
-    data->channel_currents[3] = current_values[1];  // IN1 -> CH4
-    data->channel_currents[4] = current_values[5];  // IN5 -> CH5
-    data->channel_currents[5] = current_values[6];  // IN6 -> CH6
+    // 处理各PWM通道的电流传感器
+    int valid_channel_count = 0;
+    for (int ch = 0; ch < PWM_CHANNEL_COUNT; ch++) {
+        if (HAS_CHANNEL_CURRENT_SENSOR(ch)) {
+            uint8_t adc_ch = CHANNEL_CURRENT_ADC_CHS[ch];
+            if (adc_ch < ADC128S102_CHANNEL_COUNT) {
+                uint16_t raw_val = raw_values[adc_ch];
+                float voltage = (float)raw_val * ADC_VREF / ADC_RESOLUTION;
 
-    ESP_LOGI(TAG, "ADC BATCH: Final output mapping (logical order):");
-    ESP_LOGI(TAG, "  Total current: %.3fA", data->total_input_current);
-    for (int i = 0; i < 6; i++) {
-        ESP_LOGI(TAG, "  CH%d current: %.3fA", i + 1, data->channel_currents[i]);
+                // ACS712计算 - 正常关系
+                data->channel_currents[ch] = (voltage - s_calibration.acs712_offset) / s_calibration.acs712_sensitivity;
+
+                ESP_LOGI(TAG, "ADC BATCH: CH%d (IN%d, ACS712) raw=%d -> voltage=%.3fV -> current=%.3fA",
+                         ch + 1, adc_ch, raw_val, voltage, data->channel_currents[ch]);
+
+                valid_channel_count++;
+            } else {
+                ESP_LOGW(TAG, "ADC BATCH: CH%d configured with invalid ADC channel %d", ch + 1, adc_ch);
+                data->channel_currents[ch] = 0.0f;
+            }
+        } else {
+            data->channel_currents[ch] = 0.0f;
+            ESP_LOGD(TAG, "ADC BATCH: CH%d has no current sensor configured", ch + 1);
+        }
+    }
+
+    // 输出最终结果摘要
+    ESP_LOGI(TAG, "ADC BATCH: Adaptive processing complete:");
+    if (HAS_TOTAL_CURRENT_SENSOR()) {
+        ESP_LOGI(TAG, "  Total current: %.3fA", data->total_input_current);
+    } else {
+        ESP_LOGI(TAG, "  Total current: N/A (no sensor)");
+    }
+
+    for (int i = 0; i < PWM_CHANNEL_COUNT; i++) {
+        if (HAS_CHANNEL_CURRENT_SENSOR(i)) {
+            ESP_LOGI(TAG, "  CH%d current: %.3fA", i + 1, data->channel_currents[i]);
+        } else {
+            ESP_LOGI(TAG, "  CH%d current: N/A (no sensor)", i + 1);
+        }
     }
 
     data->timestamp = esp_timer_get_time() / 1000;  // 转换为毫秒
     return ESP_OK;
 }
 
-// 将ADC原始值转换为电流
+// 将ADC原始值转换为电流 - 自适应传感器类型
 static float raw_to_current(uint8_t channel, uint16_t raw_value) {
     // 将ADC值转换为电压
     float voltage = (float)raw_value * ADC_VREF / ADC_RESOLUTION;
@@ -401,29 +389,33 @@ static float raw_to_current(uint8_t channel, uint16_t raw_value) {
     float current = 0.0f;
     const char *sensor_type = "UNKNOWN";
 
-    if (channel == ADC_CHANNEL_TOTAL_CURRENT) {
+    // 检查是否为总电流传感器通道
+    if (HAS_TOTAL_CURRENT_SENSOR() && channel == TOTAL_CURRENT_CH) {
         // ACS758计算 - 注意：值越小电流越大（反向关系）
         sensor_type = "ACS758";
-        // 反向计算：电压减小的方向是电流增大的方向
         current = (s_calibration.acs758_offset - voltage) / s_calibration.acs758_sensitivity;
 
-        ESP_LOGI(TAG, "ADC CONV: Channel %d (%s, INVERSE) raw=%d -> voltage=%.3fV -> current=%.3fA (offset=%.3fV, sens=%.3fV/A)",
-                 channel, sensor_type, raw_value, voltage, current,
-                 s_calibration.acs758_offset, s_calibration.acs758_sensitivity);
-        ESP_LOGI(TAG, "ADC CONV: ACS758 inverse formula: current=(%.3f-%.3f)/%.3f",
-                 s_calibration.acs758_offset, voltage, s_calibration.acs758_sensitivity);
-    } else if (channel == ADC_CHANNEL_CH1_CURRENT || channel == ADC_CHANNEL_CH2_CURRENT ||
-               channel == ADC_CHANNEL_CH3_CURRENT || channel == ADC_CHANNEL_CH4_CURRENT ||
-               channel == ADC_CHANNEL_CH5_CURRENT || channel == ADC_CHANNEL_CH6_CURRENT) {
-        // ACS712计算 - 正常关系
-        sensor_type = "ACS712";
-        current = (voltage - s_calibration.acs712_offset) / s_calibration.acs712_sensitivity;
-
-        ESP_LOGI(TAG, "ADC CONV: Channel %d (%s, NORMAL) raw=%d -> voltage=%.3fV -> current=%.3fA (offset=%.3fV, sens=%.3fV/A)",
-                 channel, sensor_type, raw_value, voltage, current,
-                 s_calibration.acs712_offset, s_calibration.acs712_sensitivity);
+        ESP_LOGD(TAG, "ADC CONV: Channel %d (%s, INVERSE) raw=%d -> voltage=%.3fV -> current=%.3fA",
+                 channel, sensor_type, raw_value, voltage, current);
     } else {
-        ESP_LOGW(TAG, "ADC CONV: Unknown channel %d, returning 0A", channel);
+        // 检查是否为某个通道的电流传感器
+        bool is_channel_sensor = false;
+        for (int ch = 0; ch < PWM_CHANNEL_COUNT; ch++) {
+            if (HAS_CHANNEL_CURRENT_SENSOR(ch) && CHANNEL_CURRENT_ADC_CHS[ch] == channel) {
+                // ACS712计算 - 正常关系
+                sensor_type = "ACS712";
+                current = (voltage - s_calibration.acs712_offset) / s_calibration.acs712_sensitivity;
+                is_channel_sensor = true;
+
+                ESP_LOGD(TAG, "ADC CONV: Channel %d (CH%d %s, NORMAL) raw=%d -> voltage=%.3fV -> current=%.3fA",
+                         channel, ch + 1, sensor_type, raw_value, voltage, current);
+                break;
+            }
+        }
+
+        if (!is_channel_sensor) {
+            ESP_LOGW(TAG, "ADC CONV: Channel %d has no current sensor configured, returning 0A", channel);
+        }
     }
 
     return current;
@@ -492,8 +484,8 @@ static void sampling_task(void *arg) {
                 notify_data[offset++] = (total_current_union.u >> 8) & 0xFF;
                 notify_data[offset++] = total_current_union.u & 0xFF;
 
-                // 4.2 各通道电流 (6 x float = 24字节)
-                for (int i = 0; i < 6; i++) {
+                // 4.2 各通道电流 (PWM_CHANNEL_COUNT x float = 24字节)
+                for (int i = 0; i < PWM_CHANNEL_COUNT; i++) {
                     union { float f; uint32_t u; } channel_current_union;
                     channel_current_union.f = data.channel_currents[i];
                     notify_data[offset++] = (channel_current_union.u >> 24) & 0xFF;
@@ -644,48 +636,56 @@ esp_err_t adc128s102_get_calibration(adc_calibration_t *cal) {
     return ESP_ERR_TIMEOUT;
 }
 
-// 零点校准 - 使用正确的物理通道读取
+// 零点校准 - 自适应传感器配置
 esp_err_t adc128s102_calibrate_zero_point(void) {
-    ESP_LOGI(TAG, "Starting zero point calibration...");
+    ESP_LOGI(TAG, "Starting adaptive zero point calibration...");
 
     const uint8_t sample_count = 50;
     float total_voltage_sum = 0.0f;
-    float channel_voltage_sums[6] = {0.0f};
+    float *channel_voltage_sums = calloc(PWM_CHANNEL_COUNT, sizeof(float));
     uint32_t total_samples = 0;
-    uint32_t channel_samples[6] = {0};
+    uint32_t *channel_samples = calloc(PWM_CHANNEL_COUNT, sizeof(uint32_t));
 
-    ESP_LOGI(TAG, "ADC CAL: Collecting %d samples for zero point calibration", sample_count);
+    if (!channel_voltage_sums || !channel_samples) {
+        ESP_LOGE(TAG, "ADC CAL: Failed to allocate memory for calibration");
+        free(channel_voltage_sums);
+        free(channel_samples);
+        return ESP_ERR_NO_MEM;
+    }
 
-    // 定义物理通道映射（与批量读取保持一致）
-    uint8_t physical_channels[] = {0, 4, 3, 2, 1, 5, 6};  // IN0, IN4, IN3, IN2, IN1, IN5, IN6
+    ESP_LOGI(TAG, "ADC CAL: Collecting %d samples for adaptive zero point calibration", sample_count);
 
     // 采集多次数据求平均值
     for (uint8_t i = 0; i < sample_count; i++) {
         uint16_t raw_value;
 
-        // 读取总电流通道 (IN0)
-        if (adc128s102_read_raw(physical_channels[0], &raw_value) == ESP_OK) {
-            float voltage = (float)raw_value * ADC_VREF / ADC_RESOLUTION;
-            total_voltage_sum += voltage;
-            total_samples++;
+        // 读取总电流传感器（如果存在）
+        if (HAS_TOTAL_CURRENT_SENSOR()) {
+            if (adc128s102_read_raw(TOTAL_CURRENT_CH, &raw_value) == ESP_OK) {
+                float voltage = (float)raw_value * ADC_VREF / ADC_RESOLUTION;
+                total_voltage_sum += voltage;
+                total_samples++;
 
-            if (i == 0 || i == sample_count - 1) {
-                ESP_LOGI(TAG, "ADC CAL: Sample %d - Total current (IN0): raw=%d, voltage=%.3fV",
-                         i, raw_value, voltage);
+                if (i == 0 || i == sample_count - 1) {
+                    ESP_LOGI(TAG, "ADC CAL: Sample %d - Total current (IN%d): raw=%d, voltage=%.3fV",
+                             i, TOTAL_CURRENT_CH, raw_value, voltage);
+                }
             }
         }
 
-        // 读取各通道电流 (使用物理通道号)
-        for (uint8_t ch = 0; ch < 6; ch++) {
-            uint8_t phys_channel = physical_channels[ch + 1];  // CH1-6对应的物理通道
-            if (adc128s102_read_raw(phys_channel, &raw_value) == ESP_OK) {
-                float voltage = (float)raw_value * ADC_VREF / ADC_RESOLUTION;
-                channel_voltage_sums[ch] += voltage;
-                channel_samples[ch]++;
+        // 读取各通道电流传感器
+        for (uint8_t ch = 0; ch < PWM_CHANNEL_COUNT; ch++) {
+            if (HAS_CHANNEL_CURRENT_SENSOR(ch)) {
+                uint8_t adc_ch = CHANNEL_CURRENT_ADC_CHS[ch];
+                if (adc128s102_read_raw(adc_ch, &raw_value) == ESP_OK) {
+                    float voltage = (float)raw_value * ADC_VREF / ADC_RESOLUTION;
+                    channel_voltage_sums[ch] += voltage;
+                    channel_samples[ch]++;
 
-                if (i == 0 || i == sample_count - 1) {
-                    ESP_LOGI(TAG, "ADC CAL: Sample %d - CH%d (IN%d): raw=%d, voltage=%.3fV",
-                             i, ch + 1, phys_channel, raw_value, voltage);
+                    if (i == 0 || i == sample_count - 1) {
+                        ESP_LOGI(TAG, "ADC CAL: Sample %d - CH%d (IN%d): raw=%d, voltage=%.3fV",
+                                 i, ch + 1, adc_ch, raw_value, voltage);
+                    }
                 }
             }
         }
@@ -693,25 +693,29 @@ esp_err_t adc128s102_calibrate_zero_point(void) {
         vTaskDelay(pdMS_TO_TICKS(20));  // 20ms间隔
     }
 
-    ESP_LOGI(TAG, "ADC CAL: Sample collection complete");
+    ESP_LOGI(TAG, "ADC CAL: Adaptive sample collection complete");
 
     // 更新校准参数
     adc_calibration_t new_cal = s_calibration;
-    if (total_samples > 0) {
+
+    // 校准总电流传感器（ACS758）
+    if (HAS_TOTAL_CURRENT_SENSOR() && total_samples > 0) {
         new_cal.acs758_offset = total_voltage_sum / total_samples;
-        ESP_LOGI(TAG, "ADC CAL: ACS758 offset calculated from %lu samples: %.3fV",
+        ESP_LOGI(TAG, "ADC CAL: ACS758 offset calibrated from %lu samples: %.3fV",
                  total_samples, new_cal.acs758_offset);
+    } else {
+        ESP_LOGI(TAG, "ADC CAL: No total current sensor to calibrate");
     }
 
-    // 计算所有ACS712通道的平均偏置
+    // 校准通道电流传感器（ACS712）
     float acs712_total_offset = 0.0f;
     uint32_t acs712_valid_channels = 0;
 
-    for (uint8_t ch = 0; ch < 6; ch++) {
-        if (channel_samples[ch] > 0) {
+    for (uint8_t ch = 0; ch < PWM_CHANNEL_COUNT; ch++) {
+        if (HAS_CHANNEL_CURRENT_SENSOR(ch) && channel_samples[ch] > 0) {
             float ch_offset = channel_voltage_sums[ch] / channel_samples[ch];
-            ESP_LOGI(TAG, "ADC CAL: CH%d (IN%d) offset calculated from %lu samples: %.3fV",
-                     ch + 1, physical_channels[ch + 1], channel_samples[ch], ch_offset);
+            ESP_LOGI(TAG, "ADC CAL: CH%d (IN%d) offset calibrated from %lu samples: %.3fV",
+                     ch + 1, CHANNEL_CURRENT_ADC_CHS[ch], channel_samples[ch], ch_offset);
             acs712_total_offset += ch_offset;
             acs712_valid_channels++;
         }
@@ -721,13 +725,23 @@ esp_err_t adc128s102_calibrate_zero_point(void) {
         new_cal.acs712_offset = acs712_total_offset / acs712_valid_channels;
         ESP_LOGI(TAG, "ADC CAL: Average ACS712 offset from %d channels: %.3fV",
                  acs712_valid_channels, new_cal.acs712_offset);
+    } else {
+        ESP_LOGI(TAG, "ADC CAL: No channel current sensors to calibrate");
     }
+
+    // 清理内存
+    free(channel_voltage_sums);
+    free(channel_samples);
 
     esp_err_t ret = adc128s102_set_calibration(&new_cal);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "ADC CAL: Zero point calibration completed: ACS758 offset=%.3fV, ACS712 offset=%.3fV",
-                 new_cal.acs758_offset, new_cal.acs712_offset);
-        ESP_LOGI(TAG, "ADC CAL: All ACS712 channels use averaged offset value");
+        ESP_LOGI(TAG, "ADC CAL: Adaptive zero point calibration completed");
+        if (HAS_TOTAL_CURRENT_SENSOR()) {
+            ESP_LOGI(TAG, "ADC CAL: ACS758 offset: %.3fV", new_cal.acs758_offset);
+        }
+        if (acs712_valid_channels > 0) {
+            ESP_LOGI(TAG, "ADC CAL: ACS712 offset: %.3fV", new_cal.acs712_offset);
+        }
     }
 
     return ret;
@@ -782,8 +796,8 @@ int adc128s102_ble_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_c
             response[offset++] = (total_current_union.u >> 8) & 0xFF;
             response[offset++] = total_current_union.u & 0xFF;
 
-            // 4.2 各通道电流 (6 x float = 24字节)
-            for (int i = 0; i < 6; i++) {
+            // 4.2 各通道电流 (PWM_CHANNEL_COUNT x float = 24字节)
+            for (int i = 0; i < PWM_CHANNEL_COUNT; i++) {
                 union { float f; uint32_t u; } channel_current_union;
                 channel_current_union.f = current_data.channel_currents[i];
                 response[offset++] = (channel_current_union.u >> 24) & 0xFF;

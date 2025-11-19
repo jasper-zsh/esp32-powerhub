@@ -4,30 +4,18 @@
 #include "esp_err.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "hardware_defs.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define ADC128S102_CHANNEL_COUNT    8
-#define ADC128S102_MAX_CHANNELS     6   // 实际使用通道数 (IN0总电流, IN1-IN6各通道电流)
-
-// 通道定义 (根据实际测试结果更新)
-typedef enum {
-    ADC_CHANNEL_TOTAL_CURRENT = 0,   // IN0: 总输入电流 (ACS758)
-    ADC_CHANNEL_CH4_CURRENT = 1,     // IN1: CH4电流 (ACS712)
-    ADC_CHANNEL_CH3_CURRENT = 2,     // IN2: CH6电流 (ACS712)
-    ADC_CHANNEL_CH2_CURRENT = 3,     // IN3: CH2电流 (ACS712)
-    ADC_CHANNEL_CH1_CURRENT = 4,     // IN4: CH1电流 (ACS712)
-    ADC_CHANNEL_CH5_CURRENT = 5,     // IN5: CH5电流 (ACS712)
-    ADC_CHANNEL_CH6_CURRENT = 6,     // IN6: CH3电流 (ACS712)
-    ADC_CHANNEL_RESERVED = 7,        // IN7: 保留
-} adc_channel_t;
 
 // 电流传感器数据结构
 typedef struct {
     float total_input_current;       // 总输入电流 (A)
-    float channel_currents[6];       // 各通道电流 (A)
+    float channel_currents[PWM_CHANNEL_COUNT];  // 各通道电流 (A)
     uint32_t timestamp;              // 采集时间戳 (ms)
 } current_sensor_data_t;
 
