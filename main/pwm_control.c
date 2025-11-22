@@ -8,10 +8,10 @@
 
 static const char *TAG = "pwm";
 
-// LEDC channels mapping
-static const ledc_channel_t s_ledc_ch[PWM_CHANNEL_COUNT] = {
-    LEDC_CHANNEL_0, LEDC_CHANNEL_1, LEDC_CHANNEL_2, LEDC_CHANNEL_3, LEDC_CHANNEL_4, LEDC_CHANNEL_5
-};
+// LEDC channels mapping helper
+static inline ledc_channel_t ledc_channel_for_idx(int idx) {
+    return (ledc_channel_t)(LEDC_CHANNEL_0 + idx);
+}
 
 // ESP32-S3 exposes PWM via low speed group only; keep 5 kHz timer per design
 static const ledc_mode_t s_mode = LEDC_LOW_SPEED_MODE;
@@ -139,13 +139,15 @@ static esp_err_t restart_defer_timer(uint8_t channel, uint32_t delay_ms) {
 // Helper: attach LEDC to a channel's GPIO if not already
 // Helper: drive channel using LEDC duty only
 static void set_gpio_low(int idx) {
-    (void) ledc_set_duty(s_mode, s_ledc_ch[idx], 0);
-    (void) ledc_update_duty(s_mode, s_ledc_ch[idx]);
+    ledc_channel_t ch = ledc_channel_for_idx(idx);
+    (void) ledc_set_duty(s_mode, ch, 0);
+    (void) ledc_update_duty(s_mode, ch);
 }
 
 static void set_gpio_high(int idx) {
-    (void) ledc_set_duty(s_mode, s_ledc_ch[idx], s_duty_max);
-    (void) ledc_update_duty(s_mode, s_ledc_ch[idx]);
+    ledc_channel_t ch = ledc_channel_for_idx(idx);
+    (void) ledc_set_duty(s_mode, ch, s_duty_max);
+    (void) ledc_update_duty(s_mode, ch);
 }
 
 esp_err_t pwm_control_init(void) {
@@ -172,10 +174,11 @@ esp_err_t pwm_control_init(void) {
 
     for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
         s_states[i] = 0;
+        ledc_channel_t ledc_ch = ledc_channel_for_idx(i);
         ledc_channel_config_t ch = {
             .gpio_num = PWM_CHANNEL_GPIOS[i],
             .speed_mode = s_mode,
-            .channel = s_ledc_ch[i],
+            .channel = ledc_ch,
             .intr_type = LEDC_INTR_DISABLE,
             .timer_sel = s_timer,
             .duty = 0,
@@ -209,6 +212,7 @@ static esp_err_t apply_value_internal(uint8_t channel, uint8_t value, uint16_t d
         pwm_control_stop_pattern(channel);
     }
     s_states[channel] = value;
+    ledc_channel_t ledc_ch = ledc_channel_for_idx(channel);
     if (!silent) {
         ESP_LOGI(TAG, "apply ch=%u val=%u dur_ms=%u (cancel=%d)", channel, value, (unsigned)duration_ms, (int)cancel_pattern);
     }
@@ -219,9 +223,9 @@ static esp_err_t apply_value_internal(uint8_t channel, uint8_t value, uint16_t d
     // 0 -> drive low (0% duty)
     if (value == 0) {
         if (duration_ms > 0) {
-            esp_err_t err = ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], 0, duration_ms);
+            esp_err_t err = ledc_set_fade_with_time(s_mode, ledc_ch, 0, duration_ms);
             if (err != ESP_OK) return err;
-            err = ledc_fade_start(s_mode, s_ledc_ch[channel], LEDC_FADE_NO_WAIT);
+            err = ledc_fade_start(s_mode, ledc_ch, LEDC_FADE_NO_WAIT);
             if (err != ESP_OK) return err;
             uint32_t delay_ms = duration_ms + 5U;
             err = restart_defer_timer(channel, delay_ms);
@@ -237,9 +241,9 @@ static esp_err_t apply_value_internal(uint8_t channel, uint8_t value, uint16_t d
     // 255 -> constant high
     if (value == 255) {
         if (duration_ms > 0) {
-            esp_err_t err = ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], s_duty_max, duration_ms);
+            esp_err_t err = ledc_set_fade_with_time(s_mode, ledc_ch, s_duty_max, duration_ms);
             if (err != ESP_OK) return err;
-            err = ledc_fade_start(s_mode, s_ledc_ch[channel], LEDC_FADE_NO_WAIT);
+            err = ledc_fade_start(s_mode, ledc_ch, LEDC_FADE_NO_WAIT);
             if (err != ESP_OK) return err;
             uint32_t delay_ms = duration_ms + 5U;
             err = restart_defer_timer(channel, delay_ms);
@@ -255,15 +259,15 @@ static esp_err_t apply_value_internal(uint8_t channel, uint8_t value, uint16_t d
     // 1..254 -> PWM
     esp_err_t err;
     if (duration_ms > 0) {
-        err = ledc_set_fade_with_time(s_mode, s_ledc_ch[channel], duty_target, duration_ms);
+        err = ledc_set_fade_with_time(s_mode, ledc_ch, duty_target, duration_ms);
         if (err != ESP_OK) return err;
-        err = ledc_fade_start(s_mode, s_ledc_ch[channel], LEDC_FADE_NO_WAIT);
+        err = ledc_fade_start(s_mode, ledc_ch, LEDC_FADE_NO_WAIT);
         if (err != ESP_OK) return err;
         if (!silent) ESP_LOGI(TAG, "ch=%u PWM fade to val=%u duty=%u for %u ms", channel, value, (unsigned)duty_target, (unsigned)duration_ms);
     } else {
-        err = ledc_set_duty(s_mode, s_ledc_ch[channel], duty_target);
+        err = ledc_set_duty(s_mode, ledc_ch, duty_target);
         if (err != ESP_OK) return err;
-        err = ledc_update_duty(s_mode, s_ledc_ch[channel]);
+        err = ledc_update_duty(s_mode, ledc_ch);
         if (err != ESP_OK) return err;
         if (!silent) ESP_LOGI(TAG, "ch=%u PWM set val=%u duty=%u immediately", channel, value, (unsigned)duty_target);
     }

@@ -208,6 +208,7 @@ void power_mgr_task(void *arg) {
         vTaskDelayUntil(&last, pdMS_TO_TICKS(SAMPLE_INTERVAL_MS));
 
         // 电压管理
+        #ifndef BUILTIN_ADC
         uint16_t vin_mv = ulp_get_voltage_mv();
         led_status_set_low_battery(vin_mv < s_sleep_mv);
         if (vin_mv < s_sleep_mv) {
@@ -218,6 +219,7 @@ void power_mgr_task(void *arg) {
         } else {
             low_cnt = 0;
         }
+        #endif
 
         // 温度管理
         int16_t temp;
@@ -284,7 +286,7 @@ esp_err_t power_mgr_set_cal_offset_mv(int16_t off_mv) {
 
 esp_err_t power_mgr_force_sleep(void) {
     ESP_LOGI(TAG, "Preparing deep sleep");
-    uint8_t states[6];
+    uint8_t states[PWM_CHANNEL_COUNT > 0 ? PWM_CHANNEL_COUNT : 1];
     storage_read_states(states);
     storage_write_states(states);
     (void)led_status_set_bluetooth_advertising(false);
@@ -481,9 +483,9 @@ bool power_mgr_is_ulp_mode_enabled(void) {
 
 // 外设电源管理接口
 esp_err_t power_mgr_external_power_init(void) {
-    // GPIO1控制所有外设的电源
+    // GPIO6控制所有外设的电源
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << 1),
+        .pin_bit_mask = (1ULL << 6),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -496,22 +498,22 @@ esp_err_t power_mgr_external_power_init(void) {
     }
 
     // 默认开启外设电源
-    gpio_set_level(GPIO_NUM_1, 1);
+    gpio_set_level(GPIO_NUM_6, 1);
     return ESP_OK;
 }
 
 esp_err_t power_mgr_external_power_on(void) {
-    gpio_set_level(GPIO_NUM_1, 1);
+    gpio_set_level(GPIO_NUM_6, 1);
     return ESP_OK;
 }
 
 esp_err_t power_mgr_external_power_off(void) {
-    gpio_set_level(GPIO_NUM_1, 0);
+    gpio_set_level(GPIO_NUM_6, 0);
     return ESP_OK;
 }
 
 bool power_mgr_external_power_is_on(void) {
-    return gpio_get_level(GPIO_NUM_1) == 1;
+    return gpio_get_level(GPIO_NUM_6) == 1;
 }
 
 // 事件处理接口

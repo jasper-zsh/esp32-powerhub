@@ -12,6 +12,37 @@ static const char *TAG = "temp_mgr";
 #define DS18B20_DQ_GPIO     ((gpio_num_t)TEMP_SENSOR_GPIO_NUM)
 static bool temp_mgr_initialized = false;
 
+#if TEMP_MGR_MAX_SENSORS == 0
+
+esp_err_t temp_mgr_init(void) {
+    ESP_LOGI(TAG, "Temperature sensors disabled (TEMP_SENSOR_COUNT=0)");
+    temp_mgr_initialized = true;
+    return ESP_OK;
+}
+
+esp_err_t temp_mgr_sample_once(temp_sensor_type_t sensor_type, int16_t *out_temp) {
+    (void)sensor_type;
+    if (out_temp) {
+        *out_temp = 0;
+    }
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t temp_mgr_sample_all(int16_t out_temps[TEMP_SENSOR_COUNT]) {
+    (void)out_temps;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+int temp_mgr_get_sensor_count(void) {
+    return 0;
+}
+
+void temp_mgr_deinit(void) {
+    temp_mgr_initialized = false;
+}
+
+#else
+
 static onewire_gpio_bus_handle_t bus = NULL;
 static ds18b20_gpio_device_handle_t ds18b20_sensors[TEMP_MGR_MAX_SENSORS] = {NULL};
 static uint64_t sensor_addresses[TEMP_MGR_MAX_SENSORS] = {0};
@@ -321,3 +352,5 @@ esp_err_t temp_mgr_sample_all(int16_t out_temps[TEMP_SENSOR_COUNT]) {
 int temp_mgr_get_sensor_count(void) {
     return connected_sensor_count;
 }
+
+#endif // TEMP_MGR_MAX_SENSORS == 0

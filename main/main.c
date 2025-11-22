@@ -119,11 +119,13 @@ void app_main(void) {
     ESP_LOGI(TAG, "Power mode configured: %s", ENABLE_ULP_MODE ? "ULP" : "ADC");
 
     // 6. 初始化电源管理器 (包括电压监测)
+    #ifndef BUILTIN_ADC
     ret = init_power_manager();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Power manager initialization failed");
         return;  // 电源管理器是关键组件
     }
+    #endif
 
     // 启动电源管理任务
     BaseType_t task_ret = xTaskCreate(power_mgr_task, "power_mgr", 4096, NULL, 5, NULL);

@@ -277,7 +277,10 @@ static void monitor_task(void *arg) {
 
     // 测试电压读取
     uint16_t test_voltage;
-    esp_err_t voltage_ret = power_mgr_get_voltage_mv(&test_voltage, false);
+    esp_err_t voltage_ret = current_sensor_get_power_voltage_mv(&test_voltage);
+    if (voltage_ret == ESP_ERR_NOT_SUPPORTED) {
+        voltage_ret = power_mgr_get_voltage_mv(&test_voltage, false);
+    }
     if (voltage_ret == ESP_OK) {
         ESP_LOGI(TAG, "✓ Voltage test: %umV", test_voltage);
     } else {
@@ -320,7 +323,10 @@ static void monitor_task(void *arg) {
         // 电压监控
         if (current_time - last_voltage_check >= s_config.voltage_monitor_interval) {
             uint16_t voltage_mv;
-            esp_err_t voltage_ret = power_mgr_get_voltage_mv(&voltage_mv, false);
+            esp_err_t voltage_ret = current_sensor_get_power_voltage_mv(&voltage_mv);
+            if (voltage_ret == ESP_ERR_NOT_SUPPORTED) {
+                voltage_ret = power_mgr_get_voltage_mv(&voltage_mv, false);
+            }
             if (voltage_ret == ESP_OK) {
                 float voltage_v = voltage_mv / 1000.0f;
                 s_state.last_voltage = voltage_v;
@@ -339,7 +345,7 @@ static void monitor_task(void *arg) {
                 s_state.last_total_current = current_data.total_input_current;
                 memcpy(s_state.last_channel_currents, current_data.channel_currents,
                        sizeof(s_state.last_channel_currents));
-                check_current_thresholds(current_data.channel_currents, 6);
+                check_current_thresholds(current_data.channel_currents, PWM_CHANNEL_COUNT);
             } else if (current_ret == ESP_ERR_TIMEOUT) {
                 // 互斥锁超时，可能ADC正在初始化或忙碌
                 ESP_LOGD(TAG, "ADC data busy - will retry later");
@@ -347,7 +353,7 @@ static void monitor_task(void *arg) {
                 ESP_LOGD(TAG, "Failed to get current data: %s", esp_err_to_name(current_ret));
                 // 设置为无数据状态
                 s_state.last_total_current = -1.0f;
-                for (int i = 0; i < 6; i++) {
+                for (int i = 0; i < PWM_CHANNEL_COUNT; i++) {
                     s_state.last_channel_currents[i] = -1.0f;
                 }
             }
@@ -356,6 +362,7 @@ static void monitor_task(void *arg) {
 
         // 温度监控
         if (current_time - last_temp_check >= s_config.temp_monitor_interval) {
+#if TEMP_SENSOR_COUNT > 0
             int16_t temps[TEMP_SENSOR_COUNT];
             esp_err_t temp_ret = temp_mgr_sample_all(temps);
             int16_t power_temp = temps[0];
@@ -384,6 +391,10 @@ static void monitor_task(void *arg) {
                 s_state.last_power_temp = -999.0f;
                 s_state.last_control_temp = -999.0f;
             }
+#else
+            s_state.last_power_temp = -273.0f;
+            s_state.last_control_temp = -273.0f;
+#endif
             last_temp_check = current_time;
         }
 
@@ -416,7 +427,7 @@ static void monitor_task(void *arg) {
 
             // 输出通道电流信息 - 独立显示，不受总电流限制
             ESP_LOGI(TAG, "⚡ Channel Currents:");
-            for (int i = 0; i < 6; i++) {
+            for (int i = 0; i < PWM_CHANNEL_COUNT; i++) {
                 if (s_state.last_channel_currents[i] > -10.0f) {  // 允许-10A到+10A的范围，排除明显的错误值
                     ESP_LOGI(TAG, "   CH%d: %.3fA %s", i + 1, s_state.last_channel_currents[i],
                             (s_state.current_overload_active && s_state.overload_channel == i) ? "[OVERLOAD]" : "");

@@ -1,3 +1,22 @@
+<!-- OPENSPEC:START -->
+# OpenSpec Instructions
+
+These instructions are for AI assistants working in this project.
+
+Always open `@/openspec/AGENTS.md` when the request:
+- Mentions planning or proposals (words like proposal, spec, change, plan)
+- Introduces new capabilities, breaking changes, architecture shifts, or big performance/security work
+- Sounds ambiguous and you need the authoritative spec before coding
+
+Use `@/openspec/AGENTS.md` to learn:
+- How to create and apply change proposals
+- Spec format and conventions
+- Project structure and guidelines
+
+Keep this managed block so 'openspec update' can refresh the instructions.
+
+<!-- OPENSPEC:END -->
+
 # Hardware Definition
 This project use ESP32S3 micro controller with following parts:
 
@@ -36,26 +55,6 @@ GPIO1上连接了一个分压电阻，使用ADC读取可以获得电源电压，
 
 ## Temperature sensor DS18B20
 Two DS18B20 are connected to GPIO7, one for power area, one for control area.
-
-# Documents
-Documents are divided into multiple folders in `versions` folder, like `versions/001.init`.
-In every document folder, there're two main file:
-- Original demands are in `DEMANDS.md`.
-- Designs are in `DESIGNS.md`
-
-Remember, write documents in Chinese.
-
-# Workflow for creating new version
-You MUST work in following flow when creating a new version:
-1. Chat with the user and write demands, then ask the user to check the document.
-2. Repeat step 1 until the user CONFIRM that you can go next.
-3. Chat with the user and write designs base on the demands you wrote before, then ask the user to check the document.
-4. Repeat step 3 until the user CONFIRM that you can go next.
-5. Generate code according to documents you wrote before carefully, make sure you won't broke exist logic and designs, until the new design tell you to do so.
-6. Make sure the project can build successfully.
-7. Ask the user to test the new version, resolve all problems for the user. Remember to check and update documents if nessesary when you making any changes.
-
-You can begin at any step if the user ask you to do so.
 
 # References
 Always use context7 when I need code generation, setup or configuration steps, or

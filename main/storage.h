@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "esp_err.h"
+#include "hardware_defs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -9,11 +10,11 @@ extern "C" {
 
 #define STORAGE_NAMESPACE "powerhub"
 #define STORAGE_KEY_STATES "ch_state"
-// Read 6-byte states from NVS. If not found, fills zeros.
-esp_err_t storage_read_states(uint8_t out_states[6]);
+// Read channel states from NVS (length = PWM_CHANNEL_COUNT). If not found, fills zeros.
+esp_err_t storage_read_states(uint8_t out_states[PWM_CHANNEL_COUNT]);
 
-// Write 6-byte states to NVS.
-esp_err_t storage_write_states(const uint8_t states[6]);
+// Write channel states to NVS (length = PWM_CHANNEL_COUNT).
+esp_err_t storage_write_states(const uint8_t states[PWM_CHANNEL_COUNT]);
 
 #ifdef __cplusplus
 }

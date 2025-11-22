@@ -32,7 +32,7 @@ static QueueHandle_t s_evt_queue = NULL;
 static TaskHandle_t s_sched_task = NULL;
 
 static esp_err_t persist_states(void) {
-    uint8_t states[PWM_CHANNEL_COUNT] = {0};
+    uint8_t states[PWM_CHANNEL_COUNT > 0 ? PWM_CHANNEL_COUNT : 1] = {0};
     pwm_control_get_states(states);
     esp_err_t err = storage_write_states(states);
     if (err != ESP_OK) {

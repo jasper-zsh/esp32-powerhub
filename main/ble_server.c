@@ -20,6 +20,7 @@
 #include "led_status.h"
 #include "power_mgr.h"
 #include "current_sensor.h"
+#include "hardware_defs.h"
 
 static const char *TAG = "ble";
 
@@ -50,7 +51,7 @@ static uint16_t s_state_conn_handle = 0;
 static uint16_t s_state_attr_handle = 0;
 
 // Store previous states to detect changes
-static uint8_t s_prev_states[6] = {0};
+static uint8_t s_prev_states[PWM_CHANNEL_COUNT] = {0};
 
 // Function to send channel state notifications
 static void send_state_notification_if_changed(void) {
@@ -58,12 +59,12 @@ static void send_state_notification_if_changed(void) {
         return;
     }
 
-    uint8_t current_states[6];
+    uint8_t current_states[PWM_CHANNEL_COUNT];
     pwm_control_get_states(current_states);
 
     // Check if any channel state has changed
     bool changed = false;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < PWM_CHANNEL_COUNT; i++) {
         if (current_states[i] != s_prev_states[i]) {
             changed = true;
             break;
@@ -96,16 +97,16 @@ static void send_state_notification_if_changed(void) {
             return;
         }
 
-        ESP_LOGI(TAG, "Sent CH_STATE notification (6 bytes): [%02X,%02X,%02X,%02X,%02X,%02X]",
-                 current_states[0], current_states[1], current_states[2],
-                 current_states[3], current_states[4], current_states[5]);
+        if (PWM_CHANNEL_COUNT >= 1) {
+            ESP_LOGI(TAG, "Sent CH_STATE notification (%d bytes)", (int)sizeof(current_states));
+        }
     }
 }
 
 // Read and write access callbacks
 static int chr_state_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        uint8_t states[6];  // 支持6个通道
+        uint8_t states[PWM_CHANNEL_COUNT];
         pwm_control_get_states(states);
 
         // Update cached states for change detection
