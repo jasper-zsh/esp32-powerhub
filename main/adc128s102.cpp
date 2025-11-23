@@ -4,7 +4,6 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
 #include <memory>
 
 extern "C" {
@@ -31,7 +30,7 @@ constexpr float kExternalAdcVref = 5.0f;
 constexpr float kExternalAdcResolution = 4096.0f;
 constexpr float kInternalAdcVref = 3.3f;
 constexpr float kInternalAdcResolution = 4096.0f;
-constexpr uint8_t kAdcChannelCount = 8;
+constexpr uint8_t kAdcChannelCount = 10;  // ADC1 supports channels 0-9 on ESP32-S3
 constexpr float kPowerVoltageDivider = (240000.0f + 910000.0f) / 240000.0f;
 
 uint16_t s_ble_conn_handle = 0;
@@ -41,7 +40,8 @@ bool s_ble_notifications_enabled = false;
 struct current_sensor_params_t {
     float offset;       // Zero-point voltage (V)
     float sensitivity;  // V/A sensitivity
-    int8_t adc_channel; // -1 disabled, otherwise ADC channel index
+    int8_t adc_channel; // -1 disabled, otherwise ADC channel index or GPIO (before resolve)
+    int8_t pwm_index;   // PWM channel this sensor maps to
 };
 
 struct sensor_config_t {
@@ -74,8 +74,10 @@ struct sensor_readings_t {
 };
 
 struct RawVoltageSample {
-    float channel_voltage[kAdcChannelCount];
-    bool channel_valid[kAdcChannelCount];
+    float channel_voltage[PWM_CHANNEL_COUNT];
+    bool channel_valid[PWM_CHANNEL_COUNT];
+    float total_voltage = 0.0f;
+    bool total_valid = false;
     float power_voltage;
     bool power_voltage_valid;
     uint32_t timestamp_ms;
@@ -196,16 +198,17 @@ public:
         corrected[7] = raw_values[0];
 
         if (config_.total_current.adc_channel >= 0 && config_.total_current.adc_channel < kAdcChannelCount) {
-            sample->channel_valid[config_.total_current.adc_channel] = true;
-            sample->channel_voltage[config_.total_current.adc_channel] =
+            sample->total_valid = true;
+            sample->total_voltage =
                 corrected[config_.total_current.adc_channel] * kExternalAdcVref / kExternalAdcResolution;
         }
 
         for (int i = 0; i < config_.channel_count; ++i) {
             int adc_idx = config_.channel_current[i].adc_channel;
-            if (adc_idx >= 0 && adc_idx < kAdcChannelCount) {
-                sample->channel_valid[adc_idx] = true;
-                sample->channel_voltage[adc_idx] = corrected[adc_idx] * kExternalAdcVref / kExternalAdcResolution;
+            int pwm_idx = config_.channel_current[i].pwm_index;
+            if (adc_idx >= 0 && adc_idx < kAdcChannelCount && pwm_idx >= 0 && pwm_idx < PWM_CHANNEL_COUNT) {
+                sample->channel_valid[pwm_idx] = true;
+                sample->channel_voltage[pwm_idx] = corrected[adc_idx] * kExternalAdcVref / kExternalAdcResolution;
             }
         }
 
@@ -215,17 +218,13 @@ public:
     }
 
 private:
-    static constexpr adc_channel_t kInvalidChannel = static_cast<adc_channel_t>(-1);
-    adc_unit_t resolved_unit_ = ADC_UNIT_1;
-    adc_channel_t resolved_power_channel_ = kInvalidChannel;
-    adc_channel_t resolved_total_channel_ = kInvalidChannel;
-    std::vector<adc_channel_t> resolved_channels_;
-
     void reset_sample(RawVoltageSample *sample) {
         sample->power_voltage = 0.0f;
         sample->power_voltage_valid = false;
+        sample->total_voltage = 0.0f;
+        sample->total_valid = false;
         sample->timestamp_ms = 0;
-        for (int i = 0; i < kAdcChannelCount; ++i) {
+        for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
             sample->channel_valid[i] = false;
             sample->channel_voltage[i] = 0.0f;
         }
@@ -274,37 +273,27 @@ public:
 
         // Configure total current channel if enabled
         if (config_.total_current.adc_channel >= 0) {
-            ESP_ERROR_CHECK(adc_oneshot_io_to_channel(static_cast<gpio_num_t>(config_.total_current.adc_channel), &unit, &chan));
-            if (unit != resolved_unit_) {
-                ESP_LOGE(TAG, "ADC unit mismatch for total current (got %d expected %d)", unit, resolved_unit_);
-                return ESP_ERR_INVALID_ARG;
-            }
-            resolved_total_channel_ = chan;
+            resolved_total_channel_ = static_cast<adc_channel_t>(config_.total_current.adc_channel);
             ESP_ERROR_CHECK(adc_oneshot_config_channel(unit_, resolved_total_channel_, &chan_cfg));
-            ESP_LOGI(TAG, "Initialized total current on unit %d channel %d", unit, chan);
+            ESP_LOGI(TAG, "Initialized total current on unit %d channel %d", resolved_unit_, resolved_total_channel_);
         } else {
             resolved_total_channel_ = kInvalidChannel;
         }
 
         // Configure all requested channels (deduplicate)
-        resolved_channels_.clear();
         std::array<bool, kAdcChannelCount> configured{};
         for (int i = 0; i < config_.channel_count; ++i) {
-            int gpio_idx = config_.channel_current[i].adc_channel;
-            if (gpio_idx < 0) {
-                resolved_channels_.push_back(kInvalidChannel);
+            int adc_idx = config_.channel_current[i].adc_channel;
+            if (adc_idx < 0) {
                 continue;
             }
-            ESP_ERROR_CHECK(adc_oneshot_io_to_channel(static_cast<gpio_num_t>(gpio_idx), &unit, &chan));
-            if (unit != resolved_unit_) {
-                ESP_LOGE(TAG, "ADC unit mismatch for channel %d (got %d expected %d)", i, unit, resolved_unit_);
-                return ESP_ERR_INVALID_ARG;
-            }
-            resolved_channels_.push_back(chan);
-            if (chan < kAdcChannelCount && !configured[chan]) {
-                ESP_ERROR_CHECK(adc_oneshot_config_channel(unit_, chan, &chan_cfg));
-                configured[chan] = true;
-                ESP_LOGI(TAG, "Initialized channel current on unit %d channel %d", unit, chan);
+            adc_channel_t adc_ch = static_cast<adc_channel_t>(adc_idx);
+            config_.channel_current[i].adc_channel = static_cast<int8_t>(adc_ch);
+            if (adc_ch < kAdcChannelCount && !configured[adc_ch]) {
+                ESP_ERROR_CHECK(adc_oneshot_config_channel(unit_, adc_ch, &chan_cfg));
+                configured[adc_ch] = true;
+                ESP_LOGI(TAG, "Initialized channel current on unit %d channel %d (PWM ch%d)", resolved_unit_, adc_ch,
+                         config_.channel_current[i].pwm_index + 1);
             }
         }
         return ESP_OK;
@@ -326,21 +315,30 @@ public:
 
         if (resolved_total_channel_ != kInvalidChannel) {
             if (adc_oneshot_read(unit_, resolved_total_channel_, &raw) == ESP_OK) {
-                sample->channel_valid[resolved_total_channel_] = true;
-                sample->channel_voltage[resolved_total_channel_] =
+                sample->total_valid = true;
+                sample->total_voltage =
                     static_cast<float>(raw) * kInternalAdcVref / kInternalAdcResolution;
             }
         }
 
-        for (size_t i = 0; i < resolved_channels_.size(); ++i) {
-            adc_channel_t ch = resolved_channels_[i];
-            if (ch == kInvalidChannel) {
+        for (int i = 0; i < config_.channel_count; ++i) {
+            const auto &sensor = config_.channel_current[i];
+            adc_channel_t adc_ch =
+                sensor.adc_channel >= 0 ? static_cast<adc_channel_t>(sensor.adc_channel) : kInvalidChannel;
+            int pwm_idx = sensor.pwm_index;
+            if (adc_ch == kInvalidChannel || pwm_idx < 0 || pwm_idx >= PWM_CHANNEL_COUNT) {
                 continue;
             }
-            if (adc_oneshot_read(unit_, ch, &raw) == ESP_OK) {
-                sample->channel_valid[ch] = true;
-                sample->channel_voltage[ch] =
+            esp_err_t r = adc_oneshot_read(unit_, adc_ch, &raw);
+            if (r == ESP_OK) {
+                sample->channel_valid[pwm_idx] = true;
+                sample->channel_voltage[pwm_idx] =
                     static_cast<float>(raw) * kInternalAdcVref / kInternalAdcResolution;
+                ESP_LOGI(TAG, "PWM ch%d (ADC ch%d) raw=%d voltage=%.4f",
+                         pwm_idx + 1, adc_ch, raw, sample->channel_voltage[pwm_idx]);
+            } else {
+                ESP_LOGW(TAG, "ADC read failed for PWM ch%d (ADC ch%d): %s",
+                         pwm_idx + 1, adc_ch, esp_err_to_name(r));
             }
         }
 
@@ -352,8 +350,10 @@ private:
     void reset_sample(RawVoltageSample *sample) {
         sample->power_voltage = 0.0f;
         sample->power_voltage_valid = false;
+        sample->total_voltage = 0.0f;
+        sample->total_valid = false;
         sample->timestamp_ms = 0;
-        for (int i = 0; i < kAdcChannelCount; ++i) {
+        for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
             sample->channel_valid[i] = false;
             sample->channel_voltage[i] = 0.0f;
         }
@@ -363,7 +363,6 @@ private:
     adc_unit_t resolved_unit_ = ADC_UNIT_1;
     adc_channel_t resolved_power_channel_ = kInvalidChannel;
     adc_channel_t resolved_total_channel_ = kInvalidChannel;
-    std::vector<adc_channel_t> resolved_channels_;
 
     sensor_config_t config_ = {};
     esp32_adc_config_t hw_config_;
@@ -393,6 +392,7 @@ sensor_config_t build_sensor_config_from_hardware_defs(std::array<int8_t, PWM_CH
     config.total_current.adc_channel = HAS_TOTAL_CURRENT_SENSOR() ? TOTAL_CURRENT_CH : -1;
     config.total_current.offset = TOTAL_CURRENT_OFFSET;
     config.total_current.sensitivity = TOTAL_CURRENT_SENSITIVITY;
+    config.total_current.pwm_index = -1;
 
     int idx = 0;
     for (int i = 0; i < PWM_CHANNEL_COUNT; i++) {
@@ -402,6 +402,7 @@ sensor_config_t build_sensor_config_from_hardware_defs(std::array<int8_t, PWM_CH
         config.channel_current[idx].adc_channel = CHANNEL_CURRENT_ADC_CHS[i];
         config.channel_current[idx].offset = CHANNEL_CURRENT_OFFSET;
         config.channel_current[idx].sensitivity = CHANNEL_CURRENT_SENSITIVITY;
+        config.channel_current[idx].pwm_index = i;
         if (channel_slot_map) {
             (*channel_slot_map)[i] = idx;
         }
@@ -553,6 +554,7 @@ bool copy_config_from_api(const current_sensor_config_t &api, sensor_config_t *d
     dst->total_current.adc_channel = api.total_current.adc_channel;
     dst->total_current.offset = api.total_current.offset;
     dst->total_current.sensitivity = api.total_current.sensitivity;
+    dst->total_current.pwm_index = -1;
     dst->sample_interval_ms = api.sample_interval_ms == 0 ? 100 : api.sample_interval_ms;
     dst->channel_count = api.channel_count;
     if (api.channel_count == 0) {
@@ -569,6 +571,7 @@ bool copy_config_from_api(const current_sensor_config_t &api, sensor_config_t *d
         dst->channel_current[i].adc_channel = api.channel_current[i].adc_channel;
         dst->channel_current[i].offset = api.channel_current[i].offset;
         dst->channel_current[i].sensitivity = api.channel_current[i].sensitivity;
+        dst->channel_current[i].pwm_index = (i < PWM_CHANNEL_COUNT) ? i : -1;
     }
     return true;
 }
@@ -588,6 +591,40 @@ void log_config_summary(const sensor_config_t &config, const std::array<int8_t, 
                  sensor.sensitivity);
     }
 }
+
+#if defined(BUILTIN_ADC)
+static bool resolve_gpio_to_adc(sensor_config_t *config) {
+    if (!config) {
+        return false;
+    }
+    adc_unit_t unit = ADC_UNIT_1;
+    adc_channel_t chan = static_cast<adc_channel_t>(-1);
+
+    if (config->total_current.adc_channel >= 0) {
+        if (adc_oneshot_io_to_channel(static_cast<gpio_num_t>(config->total_current.adc_channel), &unit, &chan) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to map total current GPIO%d to ADC channel", config->total_current.adc_channel);
+            return false;
+        }
+        config->total_current.adc_channel = static_cast<int8_t>(chan);
+    }
+
+    for (int i = 0; i < config->channel_count; ++i) {
+        int gpio_idx = config->channel_current[i].adc_channel;
+        if (gpio_idx < 0) {
+            continue;
+        }
+        if (adc_oneshot_io_to_channel(static_cast<gpio_num_t>(gpio_idx), &unit, &chan) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to map PWM ch%d GPIO%d to ADC channel", config->channel_current[i].pwm_index + 1,
+                     gpio_idx);
+            return false;
+        }
+        config->channel_current[i].adc_channel = static_cast<int8_t>(chan);
+        ESP_LOGI(TAG, "Mapped PWM ch%d GPIO%d -> ADC unit %d channel %d", config->channel_current[i].pwm_index + 1,
+                 gpio_idx, unit, chan);
+    }
+    return true;
+}
+#endif
 
 class SensorManager {
 public:
@@ -631,6 +668,14 @@ public:
         calibration_.acs758_offset = TOTAL_CURRENT_OFFSET;
         calibration_.acs758_sensitivity = TOTAL_CURRENT_SENSITIVITY;
         apply_calibration_to_config();
+
+        // Map GPIO indexes to ADC channels for built-in ADC
+#if defined(BUILTIN_ADC)
+        if (!resolve_gpio_to_adc(&config_)) {
+            free_sensor_config(&config_);
+            return ESP_ERR_INVALID_ARG;
+        }
+#endif
 
         if (!initialize_readings()) {
             free_sensor_config(&config_);
@@ -953,13 +998,11 @@ private:
         readings_.total_current.voltage = 0.0f;
         readings_.total_current.timestamp_ms = timestamp;
 
-        if (config_.total_current.adc_channel >= 0 &&
-            config_.total_current.adc_channel < kAdcChannelCount &&
-            sample.channel_valid[config_.total_current.adc_channel] &&
-            config_.total_current.sensitivity > 0.0f) {
-            readings_.total_current.voltage = sample.channel_voltage[config_.total_current.adc_channel];
-            readings_.total_current.current = (readings_.total_current.voltage - config_.total_current.offset) /
-                                              config_.total_current.sensitivity;
+        if (sample.total_valid && config_.total_current.sensitivity > 0.0f) {
+            readings_.total_current.voltage = sample.total_voltage;
+            readings_.total_current.current =
+                (readings_.total_current.voltage - config_.total_current.offset) /
+                config_.total_current.sensitivity;
             readings_.total_current.is_valid = true;
         }
 
@@ -970,9 +1013,10 @@ private:
             readings_.channel_currents[i].current = -1.0f;
             readings_.channel_currents[i].voltage = 0.0f;
 
-            if (sensor.adc_channel >= 0 && sensor.adc_channel < kAdcChannelCount &&
-                sample.channel_valid[sensor.adc_channel] && sensor.sensitivity > 0.0f) {
-                readings_.channel_currents[i].voltage = sample.channel_voltage[sensor.adc_channel];
+            int pwm_idx = sensor.pwm_index;
+            if (pwm_idx >= 0 && pwm_idx < PWM_CHANNEL_COUNT &&
+                sample.channel_valid[pwm_idx] && sensor.sensitivity > 0.0f) {
+                readings_.channel_currents[i].voltage = sample.channel_voltage[pwm_idx];
                 readings_.channel_currents[i].current =
                     (readings_.channel_currents[i].voltage - sensor.offset) / sensor.sensitivity;
                 readings_.channel_currents[i].is_valid = true;
@@ -1078,11 +1122,6 @@ private:
     SemaphoreHandle_t mutex_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;
     uint32_t interval_ms_ = 100;
-    static constexpr adc_channel_t kInvalidChannel = static_cast<adc_channel_t>(-1);
-    adc_unit_t resolved_unit_ = ADC_UNIT_1;
-    adc_channel_t resolved_power_channel_ = kInvalidChannel;
-    adc_channel_t resolved_total_channel_ = kInvalidChannel;
-    std::vector<adc_channel_t> resolved_channels_;
 };
 
 SensorManager &get_manager() {
