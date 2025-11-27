@@ -22,9 +22,7 @@ static uint16_t raw_to_vin_mv(int32_t raw) {
     int32_t gpio_mv = (raw * 3300) / 4095;
 
     // 根据最新的硬件定义：分压电阻为240k:910k
-    // 实际分压比 = (240k+910k)/910k ≈ 1.2637（GPIO电压 * 115 / 91）
-    // 这里使用整数运算：(gpio_mv * 115000) / 91000 约等于 *1.2637
-    int32_t vin_mv = (gpio_mv * 115000) / 91000;
+    int32_t vin_mv = (gpio_mv * 115000) / 24000;
 
     // 应用校准偏移
     vin_mv += (int32_t)cal_off_mv;
@@ -43,7 +41,7 @@ int main(void) {
 
     // 稳定ADC读数 - 确保读数稳定
     for (;;) {
-        result = ulp_riscv_adc_read_channel(ADC_UNIT_1, 1);  // ADC1_GPIO1
+        result = ulp_riscv_adc_read_channel(ADC_UNIT_1, 0);  // ADC1_GPIO1
         int32_t d = result - l_result;
         if (d > -10 && d < 10) {
             break;  // 读数稳定

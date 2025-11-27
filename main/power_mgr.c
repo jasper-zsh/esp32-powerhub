@@ -106,7 +106,7 @@ static void ulp_share_params(void) {
 static esp_err_t ulp_start(void) {
     ulp_riscv_adc_cfg_t cfg = {
         .adc_n = ADC_UNIT_1,
-        .channel = ADC_CHANNEL_1,
+        .channel = ADC_CHANNEL_0,
         .atten = ADC_ATTEN_DB_12,
         .width = ADC_BITWIDTH_DEFAULT,
         .ulp_mode = ADC_ULP_MODE_RISCV,
@@ -485,7 +485,7 @@ bool power_mgr_is_ulp_mode_enabled(void) {
 esp_err_t power_mgr_external_power_init(void) {
     // GPIO6控制所有外设的电源
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << 6),
+        .pin_bit_mask = (1ULL << PWR_GPIO),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -498,22 +498,22 @@ esp_err_t power_mgr_external_power_init(void) {
     }
 
     // 默认开启外设电源
-    gpio_set_level(GPIO_NUM_6, 1);
+    gpio_set_level(PWR_GPIO, 1);
     return ESP_OK;
 }
 
 esp_err_t power_mgr_external_power_on(void) {
-    gpio_set_level(GPIO_NUM_6, 1);
+    gpio_set_level(PWR_GPIO, 1);
     return ESP_OK;
 }
 
 esp_err_t power_mgr_external_power_off(void) {
-    gpio_set_level(GPIO_NUM_6, 0);
+    gpio_set_level(PWR_GPIO, 0);
     return ESP_OK;
 }
 
 bool power_mgr_external_power_is_on(void) {
-    return gpio_get_level(GPIO_NUM_6) == 1;
+    return gpio_get_level(PWR_GPIO) == 1;
 }
 
 // 事件处理接口

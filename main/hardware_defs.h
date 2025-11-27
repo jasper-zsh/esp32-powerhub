@@ -6,21 +6,24 @@
 extern "C" {
 #endif
 
+#define PWR_GPIO 2
+#define ABAT_GPIO 1
+
 // 全局PWM硬件定义
-#define PWM_CHANNEL_COUNT 1
+#define PWM_CHANNEL_COUNT 6
 
 // 温度传感器硬件定义
-#define TEMP_SENSOR_COUNT 0
+#define TEMP_SENSOR_COUNT 1
 #define TEMP_SENSOR_GPIO_NUM 7
 
 extern const int PWM_CHANNEL_GPIOS[PWM_CHANNEL_COUNT];
 
-// #define EXTERNAL_ADC
-// #define EXTERNAL_ADC_CS_PIN 3
-// #define EXTERNAL_ADC_SCLK_PIN 4
-// #define EXTERNAL_ADC_MISO_PIN 5
-// #define EXTERNAL_ADC_MOSI_PIN 6
-#define BUILTIN_ADC
+#define EXTERNAL_ADC
+#define EXTERNAL_ADC_CS_PIN 6
+#define EXTERNAL_ADC_SCLK_PIN 5
+#define EXTERNAL_ADC_MISO_PIN 4
+#define EXTERNAL_ADC_MOSI_PIN 3
+// #define BUILTIN_ADC
 
 // 电流传感器通道，-1为没有该传感器
 #define TOTAL_CURRENT_CH -1
