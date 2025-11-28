@@ -26,7 +26,7 @@ static const char *TAG = "current_sensor";
 
 namespace {
 
-constexpr float kExternalAdcVref = 5.0f;
+constexpr float kExternalAdcVref = 3.3f;
 constexpr float kExternalAdcResolution = 4096.0f;
 constexpr float kInternalAdcVref = 3.3f;
 constexpr float kInternalAdcResolution = 4096.0f;
@@ -856,18 +856,12 @@ public:
             buffer[offset++] = 0xFF;
         }
 
-        auto append_temp = [&buffer, &offset](temp_sensor_type_t sensor) {
-            int16_t temp;
-            if (temp_mgr_sample_once(sensor, &temp) == ESP_OK) {
-                buffer[offset++] = (temp >> 8) & 0xFF;
-                buffer[offset++] = temp & 0xFF;
-            } else {
-                buffer[offset++] = 0x80;
-                buffer[offset++] = 0x00;
-            }
-        };
-        append_temp(TEMP_SENSOR_POWER);
-        append_temp(TEMP_SENSOR_CONTROL);
+        // Temperature data - use status indicators instead of re-sampling
+        // This prevents double sampling that interferes with DS18B20 readings
+        buffer[offset++] = 0x80;  // Power temp status placeholder
+        buffer[offset++] = 0x00;
+        buffer[offset++] = 0x80;  // Control temp status placeholder
+        buffer[offset++] = 0x00;
 
         current_sensor_data_t data;
         if (get_latest(&data) == ESP_OK) {
@@ -895,10 +889,10 @@ public:
         if (power_mgr_is_thermal_protection_active()) {
             status |= 0x01;
         }
-        int16_t t1, t2;
-        if (temp_mgr_sample_once(TEMP_SENSOR_POWER, &t1) == ESP_OK &&
-            temp_mgr_sample_once(TEMP_SENSOR_CONTROL, &t2) == ESP_OK) {
-            status |= 0x02;
+        // Use cached temperature value from power_mgr to avoid re-sampling
+        int16_t cached_temp;
+        if (power_mgr_get_latest_temp(&cached_temp) == ESP_OK) {
+            status |= 0x02;  // Temperature data available
         }
         if (get_latest(&data) == ESP_OK) {
             status |= 0x04;
