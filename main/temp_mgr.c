@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "ds18b20_rmt.h"
+#include <stdio.h>
 
 static const char *TAG = "temp_mgr";
 
@@ -33,6 +34,27 @@ static uint32_t retry_delay_ms = 1000;
 static uint32_t consecutive_failures = 0;
 static uint32_t total_samples = 0;
 static uint32_t successful_samples = 0;
+
+// 温度传感器地址映射配置
+static temp_sensor_config_t sensor_mappings = {0};
+
+// 初始化默认传感器地址映射
+static void init_default_sensor_mappings(void) {
+    // 配置控制区域传感器地址
+    sensor_mappings.sensors[TEMP_SENSOR_CONTROL].address = 0x3D0225127D25CF28ULL;
+    sensor_mappings.sensors[TEMP_SENSOR_CONTROL].configured = true;
+
+    // 配置电源区域传感器地址
+    sensor_mappings.sensors[TEMP_SENSOR_POWER].address = 0xDB02253BBFE25F28ULL;
+    sensor_mappings.sensors[TEMP_SENSOR_POWER].configured = true;
+
+    ESP_LOGI(TAG, "Initialized default sensor mappings:");
+    char control_addr[17], power_addr[17];
+    temp_mgr_address_to_string(0x3D0225127D25CF28ULL, control_addr, sizeof(control_addr));
+    temp_mgr_address_to_string(0xDB02253BBFE25F28ULL, power_addr, sizeof(power_addr));
+    ESP_LOGI(TAG, "Control zone sensor: %s", control_addr);
+    ESP_LOGI(TAG, "Power zone sensor: %s", power_addr);
+}
 
 static bool temp_mgr_initialized = false;
 
@@ -65,6 +87,42 @@ void temp_mgr_deinit(void) {
     temp_mgr_initialized = false;
 }
 
+// === 温度传感器地址映射API实现（传感器禁用时） ===
+
+esp_err_t temp_mgr_set_sensor_mapping(temp_sensor_type_t sensor_type, uint64_t address) {
+    (void)sensor_type;
+    (void)address;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t temp_mgr_get_sensor_mapping(temp_sensor_type_t sensor_type, uint64_t *address, bool *configured) {
+    (void)sensor_type;
+    if (address) *address = 0;
+    if (configured) *configured = false;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t temp_mgr_clear_sensor_mapping(temp_sensor_type_t sensor_type) {
+    (void)sensor_type;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t temp_mgr_auto_detect_and_map(void) {
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+bool temp_mgr_is_valid_ds18b20_address(uint64_t address) {
+    (void)address;
+    return false;
+}
+
+void temp_mgr_address_to_string(uint64_t address, char *str, size_t len) {
+    if (str && len > 0) {
+        str[0] = '\0';
+    }
+    (void)address;
+}
+
 #else
 
 // DS18B20 RMT manager context
@@ -72,6 +130,9 @@ static ds18b20_rmt_manager_t ds18b20_manager;
 static bool ds18b20_manager_initialized = false;
 
 // === 内部辅助函数 ===
+
+// 前向声明
+static int get_sensor_index_for_type(temp_sensor_type_t sensor_type);
 
 // 发送温度事件到FreeRTOS事件系统
 static void emit_temp_event(temp_queue_event_type_t type, temp_sensor_type_t sensor_type, int16_t temperature) {
@@ -158,29 +219,40 @@ static bool perform_sensor_sample(temp_sensor_type_t sensor_type, int16_t *out_t
         return false;
     }
 
-    uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
-    if (sensor_type >= actual_sensor_count) {
+    // 根据映射配置获取实际的传感器索引
+    int sensor_index = get_sensor_index_for_type(sensor_type);
+    if (sensor_index < 0) {
+        const char* sensor_names[] = {"POWER", "CONTROL"};
+        ESP_LOGW(TAG, "%s sensor (type %d) not available",
+                (sensor_type < 2) ? sensor_names[sensor_type] : "UNKNOWN", sensor_type);
         return false;
     }
 
-    if (!ds18b20_rmt_is_sensor_connected(&ds18b20_manager, sensor_type)) {
-        ESP_LOGW(TAG, "Sensor %d is not connected", sensor_type);
+    if (!ds18b20_rmt_is_sensor_connected(&ds18b20_manager, sensor_index)) {
+        const char* sensor_names[] = {"POWER", "CONTROL"};
+        ESP_LOGW(TAG, "%s sensor (index %d) is not connected",
+                (sensor_type < 2) ? sensor_names[sensor_type] : "UNKNOWN", sensor_index);
         return false;
     }
 
     // Read temperature from the sensor
     float temperature;
-    esp_err_t err = ds18b20_rmt_get_temperature(&ds18b20_manager, sensor_type, &temperature);
+    esp_err_t err = ds18b20_rmt_get_temperature(&ds18b20_manager, sensor_index, &temperature);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read temperature from sensor %d: %s",
-                 sensor_type, esp_err_to_name(err));
+        const char* sensor_names[] = {"POWER", "CONTROL"};
+        ESP_LOGE(TAG, "Failed to read temperature from %s sensor (index %d): %s",
+                (sensor_type < 2) ? sensor_names[sensor_type] : "UNKNOWN",
+                sensor_index, esp_err_to_name(err));
         return false;
     }
 
     // Convert to 0.01°C units
     int32_t temp_calc = (int32_t)(temperature * 100);
     if (temp_calc > 32767 || temp_calc < -32768) {
-        ESP_LOGW(TAG, "Temperature out of range for sensor %d: %ld", sensor_type, temp_calc);
+        const char* sensor_names[] = {"POWER", "CONTROL"};
+        ESP_LOGW(TAG, "Temperature out of range for %s sensor (index %d): %ld",
+                (sensor_type < 2) ? sensor_names[sensor_type] : "UNKNOWN",
+                sensor_index, temp_calc);
         return false;
     }
 
@@ -259,6 +331,133 @@ static void init_cached_data(void) {
     }
 }
 
+// 验证DS18B20地址格式（8字节：1字节家族码 + 6字节序列号 + 1字节CRC）
+bool temp_mgr_is_valid_ds18b20_address(uint64_t address) {
+    if (address == 0) {
+        return false;
+    }
+
+    // DS18B20家族码是0x28
+    uint8_t family_code = (uint8_t)(address & 0xFF);
+    if (family_code != 0x28) {
+        return false;
+    }
+
+    // 简单检查：确保地址不是全0或全F
+    return (address != 0xFFFFFFFFFFFFFFFFULL) && (address != 0);
+}
+
+// 将64位DS18B20地址转换为16进制字符串（用于显示和日志）
+void temp_mgr_address_to_string(uint64_t address, char *str, size_t len) {
+    if (str == NULL || len < 17) { // 需要16个字符 + 终止符
+        if (str && len > 0) {
+            str[0] = '\0';
+        }
+        return;
+    }
+
+    // 将64位地址格式化为16位16进制字符串（小端字节序显示）
+    snprintf(str, len, "%016llX", address);
+}
+
+// 根据DS18B20地址查找传感器索引
+static int find_sensor_index_by_address(uint64_t address) {
+    uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
+
+    for (int i = 0; i < actual_sensor_count; i++) {
+        uint64_t sensor_address;
+        if (ds18b20_rmt_get_sensor_address(&ds18b20_manager, i, &sensor_address) == ESP_OK) {
+            if (sensor_address == address) {
+                return i;
+            }
+        }
+    }
+    return -1; // 未找到
+}
+
+// 获取传感器类型对应的传感器索引（考虑映射配置）
+static int get_sensor_index_for_type(temp_sensor_type_t sensor_type) {
+    if (sensor_type >= TEMP_MGR_MAX_SENSORS) {
+        return -1;
+    }
+
+    // 如果配置了映射，查找对应的传感器索引
+    if (sensor_mappings.sensors[sensor_type].configured) {
+        int sensor_index = find_sensor_index_by_address(sensor_mappings.sensors[sensor_type].address);
+        if (sensor_index >= 0) {
+            return sensor_index;
+        }
+
+        // 配置的地址未找到，记录警告并回退到索引方式
+        char addr_str[17];
+        temp_mgr_address_to_string(sensor_mappings.sensors[sensor_type].address, addr_str, sizeof(addr_str));
+        ESP_LOGW(TAG, "Configured address %s not found for sensor %d, using index fallback",
+                 addr_str, sensor_type);
+    }
+
+    // 回退到索引方式：直接使用sensor_type作为索引
+    uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
+    if (sensor_type < actual_sensor_count) {
+        return sensor_type;
+    }
+
+    return -1; // 传感器不存在
+}
+
+// 应用配置的传感器映射并更新传感器分配
+static void apply_sensor_mappings(void) {
+    uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
+    bool assigned_sensors[TEMP_MGR_MAX_SENSORS] = {false};
+
+    ESP_LOGI(TAG, "Applying configured sensor mappings:");
+
+    // 首先应用配置的映射
+    for (int sensor_type = 0; sensor_type < TEMP_MGR_MAX_SENSORS; sensor_type++) {
+        if (sensor_mappings.sensors[sensor_type].configured) {
+            int sensor_index = find_sensor_index_by_address(sensor_mappings.sensors[sensor_type].address);
+
+            if (sensor_index >= 0) {
+                assigned_sensors[sensor_index] = true;
+                char addr_str[17];
+                temp_mgr_address_to_string(sensor_mappings.sensors[sensor_type].address, addr_str, sizeof(addr_str));
+
+                const char* sensor_names[] = {"POWER", "CONTROL"};
+                ESP_LOGI(TAG, "Mapped %s sensor to address %s (index %d)",
+                        (sensor_type < 2) ? sensor_names[sensor_type] : "UNKNOWN",
+                        addr_str, sensor_index);
+            } else {
+                char addr_str[17];
+                temp_mgr_address_to_string(sensor_mappings.sensors[sensor_type].address, addr_str, sizeof(addr_str));
+                ESP_LOGW(TAG, "Configured address %s not found for sensor %d, will use fallback",
+                        addr_str, sensor_type);
+            }
+        }
+    }
+
+    // 对于未配置映射的传感器，使用发现的顺序分配
+    int next_available = 0;
+    for (int sensor_type = 0; sensor_type < TEMP_MGR_MAX_SENSORS; sensor_type++) {
+        if (!sensor_mappings.sensors[sensor_type].configured) {
+            // 找到下一个未分配的传感器
+            while (next_available < actual_sensor_count && assigned_sensors[next_available]) {
+                next_available++;
+            }
+
+            if (next_available < actual_sensor_count) {
+                uint64_t address;
+                if (ds18b20_rmt_get_sensor_address(&ds18b20_manager, next_available, &address) == ESP_OK) {
+                    char addr_str[17];
+                    temp_mgr_address_to_string(address, addr_str, sizeof(addr_str));
+                    const char* sensor_names[] = {"POWER", "CONTROL"};
+                    ESP_LOGI(TAG, "Fallback assignment: %s sensor to address %s (index %d)",
+                            (sensor_type < 2) ? sensor_names[sensor_type] : "UNKNOWN",
+                            addr_str, next_available);
+                }
+                next_available++;
+            }
+        }
+    }
+}
 
 
 esp_err_t temp_mgr_init(void) {
@@ -350,14 +549,11 @@ esp_err_t temp_mgr_init(void) {
     ESP_LOGI(TAG, "DS18B20 temperature sensors initialized (%d sensors found)", actual_sensor_count);
     ESP_LOGI(TAG, "Async temperature sampling task started with %dms interval", sampling_interval_ms);
 
-    // Print sensor assignment information
-    const char* sensor_names[] = {"POWER", "CONTROL"};
-    for (int i = 0; i < actual_sensor_count && i < TEMP_MGR_MAX_SENSORS; i++) {
-        uint64_t address;
-        ds18b20_rmt_get_sensor_address(&ds18b20_manager, i, &address);
-        ESP_LOGI(TAG, "Sensor %d: %s - Address: %016llX",
-                i, (i < 2) ? sensor_names[i] : "UNKNOWN", address);
-    }
+    // 初始化默认传感器地址映射
+    init_default_sensor_mappings();
+
+    // 应用传感器映射并显示分配信息
+    apply_sensor_mappings();
 
     return ESP_OK;
 
@@ -690,6 +886,95 @@ esp_err_t temp_mgr_trigger_immediate_sample(void) {
     }
 
     return ESP_ERR_INVALID_STATE;
+}
+
+// === 温度传感器地址映射API实现 ===
+
+esp_err_t temp_mgr_set_sensor_mapping(temp_sensor_type_t sensor_type, uint64_t address) {
+    if (sensor_type >= TEMP_MGR_MAX_SENSORS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 验证地址格式
+    if (!temp_mgr_is_valid_ds18b20_address(address)) {
+        ESP_LOGE(TAG, "Invalid DS18B20 address format: %016llX", address);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查是否与其他传感器地址冲突
+    for (int i = 0; i < TEMP_MGR_MAX_SENSORS; i++) {
+        if (i != sensor_type &&
+            sensor_mappings.sensors[i].configured &&
+            sensor_mappings.sensors[i].address == address) {
+            ESP_LOGE(TAG, "Address conflict: address %016llX already assigned to sensor %d",
+                     address, i);
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+
+    sensor_mappings.sensors[sensor_type].address = address;
+    sensor_mappings.sensors[sensor_type].configured = true;
+
+    char addr_str[17];
+    temp_mgr_address_to_string(address, addr_str, sizeof(addr_str));
+    ESP_LOGI(TAG, "Sensor %d mapped to address %s", sensor_type, addr_str);
+
+    return ESP_OK;
+}
+
+esp_err_t temp_mgr_get_sensor_mapping(temp_sensor_type_t sensor_type, uint64_t *address, bool *configured) {
+    if (sensor_type >= TEMP_MGR_MAX_SENSORS || address == NULL || configured == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *address = sensor_mappings.sensors[sensor_type].address;
+    *configured = sensor_mappings.sensors[sensor_type].configured;
+
+    return ESP_OK;
+}
+
+esp_err_t temp_mgr_clear_sensor_mapping(temp_sensor_type_t sensor_type) {
+    if (sensor_type >= TEMP_MGR_MAX_SENSORS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    sensor_mappings.sensors[sensor_type].address = 0;
+    sensor_mappings.sensors[sensor_type].configured = false;
+
+    ESP_LOGI(TAG, "Cleared mapping for sensor %d", sensor_type);
+    return ESP_OK;
+}
+
+esp_err_t temp_mgr_auto_detect_and_map(void) {
+    if (!ds18b20_manager_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
+    if (actual_sensor_count == 0) {
+        ESP_LOGW(TAG, "No DS18B20 sensors detected for auto-mapping");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_LOGI(TAG, "Auto-detecting sensors for mapping suggestions:");
+
+    // 获取所有传感器地址并显示
+    for (int i = 0; i < actual_sensor_count && i < TEMP_MGR_MAX_SENSORS; i++) {
+        uint64_t address;
+        esp_err_t ret = ds18b20_rmt_get_sensor_address(&ds18b20_manager, i, &address);
+        if (ret == ESP_OK) {
+            char addr_str[17];
+            temp_mgr_address_to_string(address, addr_str, sizeof(addr_str));
+
+            const char* sensor_names[] = {"POWER", "CONTROL"};
+            const char* sensor_name = (i < 2) ? sensor_names[i] : "UNKNOWN";
+
+            ESP_LOGI(TAG, "Sensor %d (%s): Address %s", i, sensor_name, addr_str);
+        }
+    }
+
+    ESP_LOGI(TAG, "Use temp_mgr_set_sensor_mapping() to configure specific mappings");
+    return ESP_OK;
 }
 
 #endif // TEMP_MGR_MAX_SENSORS == 0

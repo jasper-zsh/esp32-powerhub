@@ -41,6 +41,18 @@ typedef struct {
     uint32_t error_count;        // 连续错误计数
 } temp_sensor_data_t;
 
+// === 温度传感器地址映射 ===
+// DS18B20传感器地址映射条目
+typedef struct {
+    uint64_t address;            // DS18B20 64位地址
+    bool configured;             // 是否已配置映射
+} temp_sensor_mapping_t;
+
+// DS18B20地址映射配置
+typedef struct {
+    temp_sensor_mapping_t sensors[TEMP_MGR_MAX_SENSORS];
+} temp_sensor_config_t;
+
 // FreeRTOS事件组位定义
 #define TEMP_EVENT_NEW_DATA_BIT          (1 << 0)  // 新温度数据可用
 #define TEMP_EVENT_SENSOR_ERROR_BIT      (1 << 1)  // 传感器错误
@@ -127,6 +139,72 @@ bool temp_mgr_is_running(void);
 
 // 强制立即采样 (异步)
 esp_err_t temp_mgr_trigger_immediate_sample(void);
+
+// === 温度传感器地址映射API ===
+//
+// 这些API允许配置温度传感器的DS18B20地址到监控区域的映射，
+// 提供确定性的传感器分配，不受传感器发现顺序影响。
+//
+// 默认映射配置（在初始化时自动设置）：
+// - 控制区域 (TEMP_SENSOR_CONTROL): 0x3D0225127D25CF28
+// - 电源区域 (TEMP_SENSOR_POWER):    0xDB02253BBFE25F28
+//
+// 使用示例：
+// 1. 自动检测传感器：
+//    esp_err_t ret = temp_mgr_auto_detect_and_map();
+//    // 日志将显示发现的传感器地址和当前分配
+//
+// 2. 配置自定义映射（覆盖默认配置）：
+//    temp_mgr_set_sensor_mapping(TEMP_SENSOR_POWER, 0x28FF641D32150428ULL);
+//    temp_mgr_set_sensor_mapping(TEMP_SENSOR_CONTROL, 0x28FF1A3C32150471ULL);
+//
+// 3. 检查映射配置：
+//    uint64_t addr;
+//    bool configured;
+//    temp_mgr_get_sensor_mapping(TEMP_SENSOR_POWER, &addr, &configured);
+//    if (configured) {
+//        char addr_str[17];
+//        temp_mgr_address_to_string(addr, addr_str, sizeof(addr_str));
+//        printf("Power sensor mapped to: %s\n", addr_str);
+//    }
+//
+// 4. 清除映射并回退到发现顺序：
+//    temp_mgr_clear_sensor_mapping(TEMP_SENSOR_POWER);
+//    temp_mgr_clear_sensor_mapping(TEMP_SENSOR_CONTROL);
+
+// 设置温度传感器地址映射
+// @param sensor_type 传感器类型 (TEMP_SENSOR_POWER 或 TEMP_SENSOR_CONTROL)
+// @param address DS18B20 64位地址
+// @return ESP_OK 成功，ESP_ERR_INVALID_ARG 无效参数或地址，ESP_ERR_INVALID_STATE 传感器未初始化
+esp_err_t temp_mgr_set_sensor_mapping(temp_sensor_type_t sensor_type, uint64_t address);
+
+// 获取温度传感器地址映射
+// @param sensor_type 传感器类型
+// @param address 输出参数，返回配置的地址
+// @param configured 输出参数，返回是否已配置映射
+// @return ESP_OK 成功，ESP_ERR_INVALID_ARG 无效参数
+esp_err_t temp_mgr_get_sensor_mapping(temp_sensor_type_t sensor_type, uint64_t *address, bool *configured);
+
+// 清除温度传感器地址映射
+// @param sensor_type 要清除映射的传感器类型
+// @return ESP_OK 成功，ESP_ERR_INVALID_ARG 无效参数
+esp_err_t temp_mgr_clear_sensor_mapping(temp_sensor_type_t sensor_type);
+
+// 自动检测并建议地址映射
+// 扫描连接的DS18B20传感器并显示地址信息，便于配置映射
+// @return ESP_OK 成功，ESP_ERR_NOT_FOUND 未发现传感器，ESP_ERR_INVALID_STATE 传感器未初始化
+esp_err_t temp_mgr_auto_detect_and_map(void);
+
+// 验证DS18B20地址格式
+// @param address 要验证的64位地址
+// @return true 地址格式有效（DS18B20家族码0x28），false 无效
+bool temp_mgr_is_valid_ds18b20_address(uint64_t address);
+
+// 将64位地址转换为字符串（用于显示和日志）
+// @param address DS18B20 64位地址
+// @param str 输出字符串缓冲区（至少17字节）
+// @param len 缓冲区长度
+void temp_mgr_address_to_string(uint64_t address, char *str, size_t len);
 
 #ifdef __cplusplus
 }
