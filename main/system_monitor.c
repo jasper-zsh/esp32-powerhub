@@ -35,6 +35,7 @@ static const char *TAG = "system_monitor";
 
 // 全局变量
 static TaskHandle_t s_monitor_task_handle = NULL;
+static TaskHandle_t s_temp_event_task_handle = NULL;
 static QueueHandle_t s_event_queue = NULL;
 static bool s_monitor_running = false;
 
@@ -69,6 +70,9 @@ static uint8_t s_handler_count = 0;
 // 最新事件
 static system_event_t s_last_event = {0};
 
+// 温度事件处理任务前置声明
+static void temperature_event_task(void *parameter);
+
 // 内部函数声明
 static void monitor_task(void *arg);
 static esp_err_t create_and_send_event(system_event_type_t type, float value, uint8_t channel, const char *description);
@@ -94,6 +98,9 @@ esp_err_t system_monitor_init(void) {
     memset(&s_state, 0, sizeof(s_state));
     memset(&s_last_event, 0, sizeof(s_last_event));
 
+    // 温度事件系统初始化说明（实际事件任务在start中创建）
+    ESP_LOGI(TAG, "FreeRTOS event-based temperature monitoring enabled");
+
     ESP_LOGI(TAG, "System monitor initialized successfully");
     return ESP_OK;
 }
@@ -105,6 +112,7 @@ esp_err_t system_monitor_start(void) {
         return ESP_OK;
     }
 
+    // 创建主监控任务
     BaseType_t ret = xTaskCreate(monitor_task, "system_monitor",
                                 MONITOR_TASK_STACK_SIZE, NULL,
                                 MONITOR_TASK_PRIORITY, &s_monitor_task_handle);
@@ -113,8 +121,21 @@ esp_err_t system_monitor_start(void) {
         return ESP_ERR_NO_MEM;
     }
 
+    // 创建温度事件处理任务
+    ret = xTaskCreate(temperature_event_task, "temp_events",
+                      3072,  // 较小的栈大小，因为这是一个专门的事件处理任务
+                      NULL,
+                      MONITOR_TASK_PRIORITY - 1,  // 稍低的优先级
+                      &s_temp_event_task_handle);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create temperature event task");
+        vTaskDelete(s_monitor_task_handle);
+        s_monitor_task_handle = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     s_monitor_running = true;
-    ESP_LOGI(TAG, "System monitor started");
+    ESP_LOGI(TAG, "System monitor started with FreeRTOS temperature events");
     return ESP_OK;
 }
 
@@ -126,6 +147,13 @@ esp_err_t system_monitor_stop(void) {
 
     s_monitor_running = false;
 
+    // 删除温度事件处理任务
+    if (s_temp_event_task_handle != NULL) {
+        vTaskDelete(s_temp_event_task_handle);
+        s_temp_event_task_handle = NULL;
+    }
+
+    // 删除主监控任务
     if (s_monitor_task_handle != NULL) {
         vTaskDelete(s_monitor_task_handle);
         s_monitor_task_handle = NULL;
@@ -624,6 +652,69 @@ static esp_err_t check_temperature_thresholds(float power_temp, float control_te
     }
 
     return ESP_OK;
+}
+
+// 温度事件处理任务
+static void temperature_event_task(void *parameter) {
+    ESP_LOGI(TAG, "Temperature event task started");
+
+    while (s_monitor_running) {
+        // 等待温度事件，最多等待1秒
+        EventBits_t events = temp_mgr_wait_for_events(TEMP_EVENT_ALL_BITS, pdMS_TO_TICKS(1000));
+
+        if (events & TEMP_EVENT_NEW_DATA_BIT) {
+            // 处理新温度数据事件
+            temp_queue_event_t queue_event;
+            while (temp_mgr_receive_event(&queue_event, 0)) {
+                if (queue_event.type == TEMP_QUEUE_EVENT_NEW_DATA) {
+                    // 实时更新温度状态
+                    if (queue_event.sensor_type == TEMP_SENSOR_POWER) {
+                        s_state.last_power_temp = queue_event.temperature / 100.0f;
+                    } else if (queue_event.sensor_type == TEMP_SENSOR_CONTROL) {
+                        s_state.last_control_temp = queue_event.temperature / 100.0f;
+                    }
+
+                    ESP_LOGD(TAG, "Temperature update via event: %s sensor = %d.%02d°C",
+                             (queue_event.sensor_type == TEMP_SENSOR_POWER) ? "POWER" : "CONTROL",
+                             queue_event.temperature / 100, abs(queue_event.temperature % 100));
+
+                    // 立即检查阈值（比定时检查更及时）
+                    check_temperature_thresholds(s_state.last_power_temp, s_state.last_control_temp);
+                }
+            }
+        }
+
+        if (events & TEMP_EVENT_THRESHOLD_HIGH_BIT) {
+            ESP_LOGW(TAG, "High temperature threshold event received");
+            // 可以在这里添加额外的阈值处理逻辑
+        }
+
+        if (events & TEMP_EVENT_SENSOR_ERROR_BIT) {
+            // 处理传感器错误事件
+            temp_queue_event_t error_event;
+            while (temp_mgr_receive_event(&error_event, 0)) {
+                if (error_event.type == TEMP_QUEUE_EVENT_SENSOR_ERROR) {
+                    create_and_send_event(SYSTEM_EVENT_TEMP_HIGH_WARNING,
+                                        0.0f,
+                                        error_event.sensor_type,
+                                        "Temperature sensor error");
+                }
+            }
+        }
+
+        if (events & TEMP_EVENT_SENSOR_RECOVER_BIT) {
+            ESP_LOGI(TAG, "Temperature sensor recovery event received");
+            // 可以在这里添加传感器恢复处理逻辑
+        }
+
+        // 清除所有已处理的事件位
+        if (events != 0) {
+            temp_mgr_clear_events(events);
+        }
+    }
+
+    ESP_LOGI(TAG, "Temperature event task stopped");
+    vTaskDelete(NULL);
 }
 
 // 分发事件
