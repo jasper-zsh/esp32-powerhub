@@ -4,8 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
-#include "onewire_gpio.h"
-#include "ds18b20_gpio.h"
+#include "ds18b20_rmt.h"
 
 static const char *TAG = "temp_mgr";
 
@@ -68,10 +67,9 @@ void temp_mgr_deinit(void) {
 
 #else
 
-static onewire_gpio_bus_handle_t bus = NULL;
-static ds18b20_gpio_device_handle_t ds18b20_sensors[TEMP_MGR_MAX_SENSORS] = {NULL};
-static uint64_t sensor_addresses[TEMP_MGR_MAX_SENSORS] = {0};
-static int connected_sensor_count = 0;
+// DS18B20 RMT manager context
+static ds18b20_rmt_manager_t ds18b20_manager;
+static bool ds18b20_manager_initialized = false;
 
 // === 内部辅助函数 ===
 
@@ -154,33 +152,32 @@ static void update_cached_data(temp_sensor_type_t sensor_type, int16_t temperatu
     }
 }
 
-// 执行实际的传感器采样 (同步，但被任务调用)
+// Execute actual sensor sampling (synchronous, but called by task)
 static bool perform_sensor_sample(temp_sensor_type_t sensor_type, int16_t *out_temp) {
-    if (sensor_type >= connected_sensor_count || ds18b20_sensors[sensor_type] == NULL) {
+    if (!ds18b20_manager_initialized) {
         return false;
     }
 
-    // 启动温度转换
-    esp_err_t err = ds18b20_gpio_trigger_temperature_conversion(ds18b20_sensors[sensor_type]);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to trigger temperature conversion for sensor %d: %s",
-                 sensor_type, esp_err_to_name(err));
+    uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
+    if (sensor_type >= actual_sensor_count) {
         return false;
     }
 
-    // 等待转换完成
-    vTaskDelay(pdMS_TO_TICKS(150));
+    if (!ds18b20_rmt_is_sensor_connected(&ds18b20_manager, sensor_type)) {
+        ESP_LOGW(TAG, "Sensor %d is not connected", sensor_type);
+        return false;
+    }
 
-    // 读取温度
+    // Read temperature from the sensor
     float temperature;
-    err = ds18b20_gpio_get_temperature(ds18b20_sensors[sensor_type], &temperature);
+    esp_err_t err = ds18b20_rmt_get_temperature(&ds18b20_manager, sensor_type, &temperature);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read temperature from sensor %d: %s",
                  sensor_type, esp_err_to_name(err));
         return false;
     }
 
-    // 转换为0.01°C单位
+    // Convert to 0.01°C units
     int32_t temp_calc = (int32_t)(temperature * 100);
     if (temp_calc > 32767 || temp_calc < -32768) {
         ESP_LOGW(TAG, "Temperature out of range for sensor %d: %ld", sensor_type, temp_calc);
@@ -202,8 +199,18 @@ static void temp_sampling_task(void *parameter) {
     while (temp_task_running) {
         bool any_success = false;
 
-        // 采样所有传感器
-        for (int i = 0; i < connected_sensor_count; i++) {
+        // Trigger temperature conversion for all sensors first
+        esp_err_t trigger_err = ds18b20_rmt_trigger_conversion_all(&ds18b20_manager);
+        if (trigger_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to trigger temperature conversion: %s", esp_err_to_name(trigger_err));
+        }
+
+        // Wait for conversion to complete (DS18B20 requires ~750ms for 12-bit resolution)
+        vTaskDelay(pdMS_TO_TICKS(750));
+
+        // Sample all sensors
+        uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
+        for (int i = 0; i < actual_sensor_count && i < TEMP_MGR_MAX_SENSORS; i++) {
             int16_t temperature;
             bool success = perform_sensor_sample((temp_sensor_type_t)i, &temperature);
 
@@ -259,146 +266,40 @@ esp_err_t temp_mgr_init(void) {
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Initializing DS18B20 temperature sensors using GPIO bit-bang on GPIO%d", TEMP_SENSOR_GPIO_NUM);
+    ESP_LOGI(TAG, "Initializing DS18B20 temperature sensors using RMT-based 1-Wire on GPIO%d", TEMP_SENSOR_GPIO_NUM);
 
-    // 初始化1-Wire GPIO总线
-    ESP_LOGI(TAG, "Creating 1-Wire GPIO bus for DS18B20");
-    ESP_LOGI(TAG, "GPIO%d configuration: internal pull-up disabled, external 4.7kΩ pull-up required", TEMP_SENSOR_GPIO_NUM);
-
-    onewire_gpio_config_t bus_config = {
-        .gpio_num = DS18B20_DQ_GPIO,
-        .enable_pullup = false,  // 需要外部4.7kΩ上拉电阻
+    // Initialize DS18B20 RMT manager (exactly like the example)
+    ds18b20_rmt_config_t config = {
+        .bus_gpio_num = TEMP_SENSOR_GPIO_NUM,
+        .enable_pull_up = true,  // enable the internal pull-up resistor in case the external device didn't have one
+        .max_rx_bytes = 10,      // 1byte ROM command + 8byte ROM number + 1byte device command
     };
 
-    esp_err_t ret = onewire_gpio_new_bus(&bus_config, &bus);
+    esp_err_t ret = ds18b20_rmt_init(&config, &ds18b20_manager);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create 1-Wire GPIO bus: %s", esp_err_to_name(ret));
-        ESP_LOGE(TAG, "Check GPIO%d wiring and external pull-up resistor (4.7kΩ recommended)", TEMP_SENSOR_GPIO_NUM);
-        ESP_LOGE(TAG, "This GPIO implementation avoids RMT channel conflicts with LED");
+        ESP_LOGE(TAG, "Failed to initialize DS18B20 RMT manager: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Check GPIO%d wiring and pull-up resistor", TEMP_SENSOR_GPIO_NUM);
         return ret;
     }
-    ESP_LOGI(TAG, "1-Wire GPIO bus successfully created on GPIO%d", TEMP_SENSOR_GPIO_NUM);
 
-    // 等待总线稳定
-    ESP_LOGD(TAG, "Waiting for 1-Wire bus to stabilize...");
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // 搜索所有DS18B20传感器，增加重试机制
-    onewire_gpio_device_iter_handle_t iter = NULL;
-    onewire_gpio_device_t next_onewire_device;
-    esp_err_t search_result = ESP_OK;
-    int sensor_count = 0;
-    int retry_count = 0;
-    const int max_retries = 3;
-
-    while (retry_count < max_retries && sensor_count == 0) {
-        ESP_LOGI(TAG, "Searching for DS18B20 sensors (attempt %d/%d)", retry_count + 1, max_retries);
-        ESP_LOGD(TAG, "Performing 1-Wire reset and presence detection...");
-
-        ret = onewire_gpio_new_device_iter(bus, &iter);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to create device iterator: %s", esp_err_to_name(ret));
-            ESP_LOGD(TAG, "1-Wire bus may be disconnected or shorted");
-            retry_count++;
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-
-        ESP_LOGD(TAG, "Device iterator created successfully, starting ROM search...");
-
-        do {
-            search_result = onewire_gpio_device_iter_get_next(iter, &next_onewire_device);
-            if (search_result == ESP_OK) {
-                // 打印发现的设备地址原始数据 (假设address是64位整数)
-                uint64_t device_rom = next_onewire_device.address;
-                ESP_LOGI(TAG, "Found 1-Wire device, raw address: %016llX", device_rom);
-
-                // 提取字节数组用于CRC计算
-                uint8_t addr_bytes[8];
-                for (int i = 0; i < 8; i++) {
-                    addr_bytes[i] = (device_rom >> (i * 8)) & 0xFF;
-                }
-
-                // 计算并显示CRC校验结果
-                uint8_t calculated_crc = onewire_gpio_crc8(addr_bytes, 7);
-                if (calculated_crc == addr_bytes[7]) {
-                    ESP_LOGI(TAG, "CRC check: PASS (calculated=0x%02X, received=0x%02X)",
-                             calculated_crc, addr_bytes[7]);
-                } else {
-                    ESP_LOGW(TAG, "CRC check: FAIL for device %016llX", device_rom);
-                    ESP_LOGW(TAG, "  Raw address: %02X %02X %02X %02X %02X %02X %02X %02X",
-                             addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3],
-                             addr_bytes[4], addr_bytes[5], addr_bytes[6], addr_bytes[7]);
-                    ESP_LOGW(TAG, "  Calculated CRC: 0x%02X, Received CRC: 0x%02X",
-                             calculated_crc, addr_bytes[7]);
-                    ESP_LOGW(TAG, "  Family code: 0x%02X", addr_bytes[0]);
-                }
-
-                ds18b20_gpio_config_t ds_cfg = {
-                    .resolution = DS18B20_RESOLUTION_12BIT,
-                    .parasite_power = false,
-                };
-                ds18b20_gpio_device_handle_t sensor;
-                if (ds18b20_gpio_new_device(bus, &next_onewire_device, &ds_cfg, &sensor) == ESP_OK) {
-                    uint64_t address;
-                    ds18b20_gpio_get_device_address(sensor, &address);
-                    ESP_LOGI(TAG, "DS18B20 sensor #%d successfully initialized (address: %016llX)", sensor_count + 1, address);
-
-                    // 保存传感器句柄和地址，最多支持TEMP_MGR_MAX_SENSORS个传感器
-                    if (sensor_count < TEMP_MGR_MAX_SENSORS) {
-                        ds18b20_sensors[sensor_count] = sensor;
-                        sensor_addresses[sensor_count] = address;
-                        ESP_LOGI(TAG, "Sensor #%d assigned to slot %d", sensor_count + 1, sensor_count);
-                    } else {
-                        ESP_LOGW(TAG, "Found more sensors than supported (%d), ignoring sensor with address %016llX",
-                                TEMP_MGR_MAX_SENSORS, address);
-                        ds18b20_gpio_del_device(sensor);
-                    }
-                    sensor_count++;
-                } else {
-                    ESP_LOGW(TAG, "Found 1-Wire device but it's not a valid DS18B20");
-                }
-            } else if (search_result == ESP_ERR_INVALID_CRC) {
-                ESP_LOGW(TAG, "CRC error during device search - received data failed CRC validation");
-                ESP_LOGW(TAG, "This typically happens when no devices are connected or there's noise on the line");
-                vTaskDelay(pdMS_TO_TICKS(2000));
-            } else if (search_result != ESP_ERR_NOT_FOUND) {
-                ESP_LOGW(TAG, "Unexpected error during device search: %s", esp_err_to_name(search_result));
-                vTaskDelay(pdMS_TO_TICKS(2000));
-            }
-        } while (search_result != ESP_ERR_NOT_FOUND);
-
-        onewire_gpio_del_device_iter(iter);
-
-        if (sensor_count == 0) {
-            retry_count++;
-            if (retry_count < max_retries) {
-                ESP_LOGW(TAG, "No DS18B20 sensors found, retrying in 500ms...");
-                ESP_LOGW(TAG, "Troubleshooting tips:");
-                ESP_LOGW(TAG, "  1. Check GPIO%d connection to DS18B20 data line", TEMP_SENSOR_GPIO_NUM);
-                ESP_LOGW(TAG, "  2. Verify 4.7kΩ pull-up resistor between GPIO%d and VCC", TEMP_SENSOR_GPIO_NUM);
-                ESP_LOGW(TAG, "  3. Ensure DS18B20 is powered (VCC connected to 3.3V)");
-                ESP_LOGW(TAG, "  4. Check for loose connections or short circuits");
-                vTaskDelay(pdMS_TO_TICKS(500));
-            }
-        } else {
-            ESP_LOGI(TAG, "Device search completed successfully on attempt %d", retry_count + 1);
-        }
+    // Discover DS18B20 sensors
+    ret = ds18b20_rmt_discover_sensors(&ds18b20_manager);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to discover DS18B20 sensors: %s", esp_err_to_name(ret));
+        ds18b20_rmt_deinit(&ds18b20_manager);
+        return ret;
     }
 
+    uint8_t sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
     if (sensor_count == 0) {
-        ESP_LOGW(TAG, "No DS18B20 sensors found after %d attempts", max_retries);
-        ESP_LOGW(TAG, "This is normal if no sensors are connected to GPIO%d", TEMP_SENSOR_GPIO_NUM);
-        // 清理资源
-        if (bus) {
-            onewire_gpio_del_bus(bus);
-            bus = NULL;
-        }
+        ESP_LOGW(TAG, "No DS18B20 sensors found on GPIO%d", TEMP_SENSOR_GPIO_NUM);
+        ESP_LOGW(TAG, "This is normal if no sensors are connected");
+        ds18b20_rmt_deinit(&ds18b20_manager);
         return ESP_ERR_NOT_FOUND;
     }
 
-    // 更新连接的传感器数量（取实际找到的数量和最大支持数量的最小值）
-    connected_sensor_count = (sensor_count < TEMP_MGR_MAX_SENSORS) ? sensor_count : TEMP_MGR_MAX_SENSORS;
+    ds18b20_manager_initialized = true;
+    ESP_LOGI(TAG, "DS18B20 RMT manager initialized successfully (%d sensors found)", sensor_count);
 
     // 初始化新的异步组件
     ESP_LOGI(TAG, "Initializing async temperature manager components with FreeRTOS events");
@@ -445,21 +346,23 @@ esp_err_t temp_mgr_init(void) {
     }
 
     temp_mgr_initialized = true;
-    ESP_LOGI(TAG, "DS18B20 temperature sensors initialized (%d sensors found, %d supported)",
-             sensor_count, connected_sensor_count);
+    uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
+    ESP_LOGI(TAG, "DS18B20 temperature sensors initialized (%d sensors found)", actual_sensor_count);
     ESP_LOGI(TAG, "Async temperature sampling task started with %dms interval", sampling_interval_ms);
 
-    // 打印传感器分配信息
-    for (int i = 0; i < connected_sensor_count; i++) {
-        const char* sensor_names[] = {"POWER", "CONTROL"};
+    // Print sensor assignment information
+    const char* sensor_names[] = {"POWER", "CONTROL"};
+    for (int i = 0; i < actual_sensor_count && i < TEMP_MGR_MAX_SENSORS; i++) {
+        uint64_t address;
+        ds18b20_rmt_get_sensor_address(&ds18b20_manager, i, &address);
         ESP_LOGI(TAG, "Sensor %d: %s - Address: %016llX",
-                i, sensor_names[i], sensor_addresses[i]);
+                i, (i < 2) ? sensor_names[i] : "UNKNOWN", address);
     }
 
     return ESP_OK;
 
 cleanup:
-    // 清理资源
+    // Clean up resources
     if (data_mutex) {
         vSemaphoreDelete(data_mutex);
         data_mutex = NULL;
@@ -472,15 +375,9 @@ cleanup:
         vQueueDelete(temp_event_queue);
         temp_event_queue = NULL;
     }
-    if (bus) {
-        onewire_gpio_del_bus(bus);
-        bus = NULL;
-    }
-    for (int i = 0; i < TEMP_MGR_MAX_SENSORS; i++) {
-        if (ds18b20_sensors[i] != NULL) {
-            ds18b20_gpio_del_device(ds18b20_sensors[i]);
-            ds18b20_sensors[i] = NULL;
-        }
+    if (ds18b20_manager_initialized) {
+        ds18b20_rmt_deinit(&ds18b20_manager);
+        ds18b20_manager_initialized = false;
     }
     return ESP_ERR_NO_MEM;
 }
@@ -535,22 +432,13 @@ void temp_mgr_deinit(void) {
         temp_event_queue = NULL;
     }
 
-    // 清理所有DS18B20设备
-    for (int i = 0; i < TEMP_MGR_MAX_SENSORS; i++) {
-        if (ds18b20_sensors[i] != NULL) {
-            ds18b20_gpio_del_device(ds18b20_sensors[i]);
-            ds18b20_sensors[i] = NULL;
-        }
+    // Clean up DS18B20 RMT manager
+    if (ds18b20_manager_initialized) {
+        ds18b20_rmt_deinit(&ds18b20_manager);
+        ds18b20_manager_initialized = false;
     }
 
-    // 清理1-Wire总线
-    if (bus != NULL) {
-        onewire_gpio_del_bus(bus);
-        bus = NULL;
-    }
-
-    // 重置传感器计数和状态
-    connected_sensor_count = 0;
+    // Reset statistics
     consecutive_failures = 0;
     total_samples = 0;
     successful_samples = 0;
@@ -569,8 +457,9 @@ esp_err_t temp_mgr_sample_once(temp_sensor_type_t sensor_type, int16_t *out_temp
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (sensor_type >= connected_sensor_count) {
-        ESP_LOGW(TAG, "Sensor %d not available (connected: %d)", sensor_type, connected_sensor_count);
+    uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
+    if (sensor_type >= actual_sensor_count) {
+        ESP_LOGW(TAG, "Sensor %d not available (connected: %d)", sensor_type, actual_sensor_count);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -595,7 +484,8 @@ esp_err_t temp_mgr_sample_all(int16_t out_temps[TEMP_SENSOR_COUNT]) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (connected_sensor_count == 0) {
+    uint8_t actual_sensor_count = ds18b20_rmt_get_sensor_count(&ds18b20_manager);
+    if (actual_sensor_count == 0) {
         ESP_LOGW(TAG, "No sensors connected");
         return ESP_ERR_NOT_FOUND;
     }
@@ -618,7 +508,10 @@ esp_err_t temp_mgr_sample_all(int16_t out_temps[TEMP_SENSOR_COUNT]) {
 }
 
 int temp_mgr_get_sensor_count(void) {
-    return connected_sensor_count;
+    if (!ds18b20_manager_initialized) {
+        return 0;
+    }
+    return ds18b20_rmt_get_sensor_count(&ds18b20_manager);
 }
 
 // === 新的异步API实现 ===
