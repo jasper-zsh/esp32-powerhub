@@ -42,39 +42,39 @@
 - [x] 4.3 Ensure `current_sensor_data_t` structure maintains compatibility
 - [x] 4.4 Add dynamic configuration passing functions for C API
 - [x] 4.5 Add memory management wrapper functions for C API compatibility
-- [ ] 4.6 Validate BLE interface continues to work with new implementation
+- [x] 4.6 Validate BLE interface continues to work with new implementation
 
 ## 5. Update System Integration
-- [ ] 5.1 Update `system_monitor.c` to work with new SensorManager (if needed)
-- [ ] 5.2 Validate power voltage monitoring separation from current sensing
-- [ ] 5.3 Test BLE notification system with new SensorManager
-- [ ] 5.4 Ensure calibration zero-point procedure works with new implementation
+- [x] 5.1 Update `system_monitor.c` to work with new SensorManager (if needed)
+- [x] 5.2 Validate power voltage monitoring separation from current sensing
+- [x] 5.3 Test BLE notification system with new SensorManager
+- [x] 5.4 Ensure calibration zero-point procedure works with new implementation
 
 ## 6. Testing and Validation
-- [ ] 6.1 Test ADC128S102 driver returns pure voltage measurements
-- [ ] 6.2 Test variable channel configurations (1, 3, 6 channels)
-- [ ] 6.3 Test optional total current sensor enable/disable
-- [ ] 6.4 Validate dynamic configuration building from hardware_defs.h
-- [ ] 6.5 Test ADC channel to sensor mapping with dynamic arrays
-- [ ] 6.6 Test variable channel count allocation (1, 3, 6 channels)
-- [ ] 6.7 Test memory management for dynamic allocation/deallocation
-- [ ] 6.8 Test simplified current_sensor_params_t per-sensor calibration
-- [ ] 6.9 Test sensor validity logic using adc_channel >= 0 instead of is_valid field
-- [ ] 6.10 Test power voltage interface consistency across both ADC drivers
-- [ ] 6.11 Validate Adc128s102Driver does not read power voltage from external ADC
-- [ ] 6.12 Validate Esp32InternalAdcDriver reads power voltage from GPIO1 directly
-- [ ] 6.13 Test ULP integration for power voltage when using external ADC driver
-- [ ] 6.14 Validate ESP32 ADC unit determination from GPIO routing
-- [ ] 6.15 Validate voltage-to-current conversion accuracy
-- [ ] 6.16 Test calibration procedures for both sensor types
-- [ ] 6.17 Verify existing C API compatibility
-- [ ] 6.18 Test BLE interface with sensor data
-- [ ] 6.19 Validate system monitor integration
-- [ ] 6.20 Test memory leak prevention with repeated allocation/deallocation
+- [x] 6.1 Test ADC128S102 driver returns pure voltage measurements
+- [x] 6.2 Test variable channel configurations (1, 3, 6 channels)
+- [x] 6.3 Test optional total current sensor enable/disable
+- [x] 6.4 Validate dynamic configuration building from hardware_defs.h
+- [x] 6.5 Test ADC channel to sensor mapping with dynamic arrays
+- [x] 6.6 Test variable channel count allocation (1, 3, 6 channels)
+- [x] 6.7 Test memory management for dynamic allocation/deallocation
+- [x] 6.8 Test simplified current_sensor_params_t per-sensor calibration
+- [x] 6.9 Test sensor validity logic using adc_channel >= 0 instead of is_valid field
+- [x] 6.10 Test power voltage interface consistency across both ADC drivers
+- [x] 6.11 Validate Adc128s102Driver does not read power voltage from external ADC
+- [x] 6.12 Validate Esp32InternalAdcDriver reads power voltage from GPIO1 directly
+- [x] 6.13 Test ULP integration for power voltage when using external ADC driver
+- [x] 6.14 Validate ESP32 ADC unit determination from GPIO routing
+- [x] 6.15 Validate voltage-to-current conversion accuracy
+- [x] 6.16 Test calibration procedures for both sensor types
+- [x] 6.17 Verify existing C API compatibility
+- [x] 6.18 Test BLE interface with sensor data
+- [x] 6.19 Validate system monitor integration
+- [x] 6.20 Test memory leak prevention with repeated allocation/deallocation
 
 ## 7. Documentation and Cleanup
-- [ ] 7.1 Update hardware_defs.h documentation for new SensorManager architecture
+- [x] 7.1 Update hardware_defs.h documentation for new SensorManager architecture
 - [ ] 7.2 Remove old current sensor implementation code
 - [ ] 7.3 Update inline code documentation for dynamic memory management
 - [ ] 7.4 Add memory management safety documentation
-- [ ] 7.5 Validate build system compatibility with new structure
+- [x] 7.5 Validate build system compatibility with new structure
