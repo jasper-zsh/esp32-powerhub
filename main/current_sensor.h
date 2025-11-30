@@ -14,15 +14,12 @@ extern "C" {
 #define CURRENT_SENSOR_MAX_CHANNELS PWM_CHANNEL_COUNT
 
 typedef struct {
-    float total_input_current;                     // 总输入电流 (A)，无数据填-1
     float channel_currents[CURRENT_SENSOR_MAX_CHANNELS]; // 各通道电流 (A)，无数据填-1
     uint32_t timestamp_ms;                         // 采集时间戳
-    uint32_t valid_mask;                           // bit0=总电流，bit1-6对应CH1-CH6
+    uint32_t valid_mask;                           // bit1-6对应CH1-CH6
 } current_sensor_data_t;
 
 typedef struct {
-    float acs758_offset;       // 总电流传感器零点 (V)
-    float acs758_sensitivity;  // 总电流传感器灵敏度 (V/A)
     float acs712_offset;       // 通道传感器零点 (V)
     float acs712_sensitivity;  // 通道传感器灵敏度 (V/A)
 } current_sensor_calibration_t;
@@ -34,7 +31,6 @@ typedef struct {
 } current_sensor_params_config_t;
 
 typedef struct {
-    current_sensor_params_config_t total_current;       // 总电流传感器参数
     current_sensor_params_config_t *channel_current;    // 动态数组，长度为channel_count
     uint8_t channel_count;                              // 实际电流通道数量
     uint32_t sample_interval_ms;                        // 采样间隔

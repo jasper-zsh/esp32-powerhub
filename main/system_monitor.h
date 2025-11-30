@@ -78,7 +78,6 @@ typedef struct {
 typedef struct {
     // 当前状态
     float last_voltage;                // 最后电压值 (V)
-    float last_total_current;          // 最后总电流值 (A)
     float last_channel_currents[PWM_CHANNEL_COUNT];    // 最后各通道电流值 (A)
     float last_power_temp;             // 最后电源区域温度 (°C)
     float last_control_temp;           // 最后控制区域温度 (°C)

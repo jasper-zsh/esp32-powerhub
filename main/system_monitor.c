@@ -293,7 +293,7 @@ static void monitor_task(void *arg) {
     current_sensor_data_t test_current;
     esp_err_t current_ret = current_sensor_get_latest(&test_current);
     if (current_ret == ESP_OK) {
-        ESP_LOGI(TAG, "✓ Current test: Total=%.3fA", test_current.total_input_current);
+        ESP_LOGI(TAG, "✓ Current test: Channel currents available");
     } else {
         ESP_LOGW(TAG, "✗ Current test failed: %s", esp_err_to_name(current_ret));
     }
@@ -342,7 +342,7 @@ static void monitor_task(void *arg) {
             current_sensor_data_t current_data;
             esp_err_t current_ret = current_sensor_get_latest(&current_data);
             if (current_ret == ESP_OK) {
-                s_state.last_total_current = current_data.total_input_current;
+                // Total current monitoring removed - now channel-only monitoring
                 memcpy(s_state.last_channel_currents, current_data.channel_currents,
                        sizeof(s_state.last_channel_currents));
                 check_current_thresholds(current_data.channel_currents, PWM_CHANNEL_COUNT);
@@ -352,7 +352,6 @@ static void monitor_task(void *arg) {
             } else {
                 ESP_LOGD(TAG, "Failed to get current data: %s", esp_err_to_name(current_ret));
                 // 设置为无数据状态
-                s_state.last_total_current = -1.0f;
                 for (int i = 0; i < PWM_CHANNEL_COUNT; i++) {
                     s_state.last_channel_currents[i] = -1.0f;
                 }
@@ -418,12 +417,7 @@ static void monitor_task(void *arg) {
                 ESP_LOGI(TAG, "🔋 Voltage: [NO DATA]");
             }
 
-            // 输出电流信息 - 总电流
-            if (s_state.last_total_current >= 0) {
-                ESP_LOGI(TAG, "⚡ Total Current: %.2fA", s_state.last_total_current);
-            } else {
-                ESP_LOGI(TAG, "⚡ Total Current: [NO DATA]");
-            }
+            // 输出电流信息 - 通道电流
 
             // 输出通道电流信息 - 独立显示，不受总电流限制
             ESP_LOGI(TAG, "⚡ Channel Currents:");

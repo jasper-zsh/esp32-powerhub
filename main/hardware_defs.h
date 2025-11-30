@@ -8,7 +8,7 @@
 // - VoltageSensorDriver: Base class for hardware-specific voltage measurement only
 // - SensorManager: Parent class handling voltage-to-current conversion and calibration
 // - ADC drivers inherit from VoltageSensorDriver and only return voltage values
-// - Configuration-based dynamic channel mapping (1-6 channels, optional total current)
+// - Configuration-based dynamic channel mapping (1-6 channels, no total current)
 // - C API compatibility maintained through current_sensor.h wrapper functions
 //
 // Power Voltage Monitoring:
@@ -48,7 +48,8 @@ extern const int PWM_CHANNEL_GPIOS[PWM_CHANNEL_COUNT];
 
 #ifdef EXTERNAL_ADC
 // ADC128S102 SPI Interface Configuration
-// External ADC provides 8 channels (0-7) for current sensor measurements
+// External ADC provides 8 channels (0-7) for individual channel current measurements
+// Channels 0-5 are mapped to PWM channels CH6-CH1 respectively
 #define EXTERNAL_ADC_CS_PIN 6      // SPI Chip Select GPIO
 #define EXTERNAL_ADC_SCLK_PIN 5    // SPI Serial Clock GPIO
 #define EXTERNAL_ADC_MISO_PIN 4    // SPI MISO GPIO
@@ -63,7 +64,7 @@ extern const int PWM_CHANNEL_GPIOS[PWM_CHANNEL_COUNT];
 // ADC unit is automatically determined by GPIO pin routing
 #endif
 
-// Current Sensor Configuration for SensorManager Architecture
+// Current Sensor Configuration for Channel-Only Architecture
 //
 // The sensor configuration uses a flexible mapping system where:
 // - adc_channel >= 0: Sensor is enabled and mapped to that ADC channel
@@ -71,20 +72,14 @@ extern const int PWM_CHANNEL_GPIOS[PWM_CHANNEL_COUNT];
 // - Dynamic allocation: Only enabled sensors consume memory
 // - Per-sensor calibration: Each sensor has independent offset and sensitivity
 //
-// Total Current Sensor (ACS758, typically):
-#define TOTAL_CURRENT_CH -1  // Set to -1 to disable, or ADC channel 0-7 to enable
-#define TOTAL_CURRENT_OFFSET 2.5f        // Zero-point voltage reference (V)
-#define TOTAL_CURRENT_SENSITIVITY 0.020f  // Voltage-to-current conversion factor (V/A)
-
-// Channel Current Sensors (ACS712, typically):
-// Each PWM channel can have an independent current sensor mapped to any ADC channel
+// Channel Current Sensors (ACS712):
+// Each PWM channel has an independent current sensor mapped to ADC channels
 extern const int CHANNEL_CURRENT_ADC_CHS[PWM_CHANNEL_COUNT];  // [-1 = disabled, 0-7 = ADC channel]
 #define CHANNEL_CURRENT_OFFSET 1.65f        // Zero-point voltage reference (V)
 #define CHANNEL_CURRENT_SENSITIVITY 0.066f  // Voltage-to-current conversion factor (V/A)
 
 // Configuration Helper Macros:
 // These macros support runtime validation and dynamic channel allocation
-#define HAS_TOTAL_CURRENT_SENSOR() (TOTAL_CURRENT_CH >= 0)
 #define HAS_CHANNEL_CURRENT_SENSOR(ch) (CHANNEL_CURRENT_ADC_CHS[ch] >= 0)
 
 // 计算有效的电流传感器数量
