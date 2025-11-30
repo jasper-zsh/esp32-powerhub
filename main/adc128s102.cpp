@@ -853,12 +853,33 @@ public:
             buffer[offset++] = 0xFF;
         }
 
-        // Temperature data - use status indicators instead of re-sampling
-        // This prevents double sampling that interferes with DS18B20 readings
-        buffer[offset++] = 0x80;  // Power temp status placeholder
-        buffer[offset++] = 0x00;
-        buffer[offset++] = 0x80;  // Control temp status placeholder
-        buffer[offset++] = 0x00;
+        // Temperature data - get actual readings from temperature manager
+        // Format: int16 in 0.01°C units, 0x8000 indicates invalid data
+        temp_sensor_data_t power_temp, control_temp;
+
+        // Get power area temperature
+        if (temp_mgr_get_cached(TEMP_SENSOR_POWER, &power_temp) == ESP_OK &&
+            power_temp.status == TEMP_STATUS_VALID) {
+            uint16_t temp_uint16 = (uint16_t)power_temp.temperature;
+            buffer[offset++] = (temp_uint16 >> 8) & 0xFF;
+            buffer[offset++] = temp_uint16 & 0xFF;
+        } else {
+            // Invalid data marker
+            buffer[offset++] = 0x80;
+            buffer[offset++] = 0x00;
+        }
+
+        // Get control area temperature
+        if (temp_mgr_get_cached(TEMP_SENSOR_CONTROL, &control_temp) == ESP_OK &&
+            control_temp.status == TEMP_STATUS_VALID) {
+            uint16_t temp_uint16 = (uint16_t)control_temp.temperature;
+            buffer[offset++] = (temp_uint16 >> 8) & 0xFF;
+            buffer[offset++] = temp_uint16 & 0xFF;
+        } else {
+            // Invalid data marker
+            buffer[offset++] = 0x80;
+            buffer[offset++] = 0x00;
+        }
 
         current_sensor_data_t data;
         if (get_latest(&data) == ESP_OK) {
@@ -1067,7 +1088,7 @@ private:
         if (!s_ble_notifications_enabled || s_ble_conn_handle == 0) {
             return;
         }
-        uint8_t payload[36];
+        uint8_t payload[32];
         if (ble_read(payload, sizeof(payload)) != ESP_OK) {
             return;
         }
