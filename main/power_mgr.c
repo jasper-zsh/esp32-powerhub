@@ -356,26 +356,38 @@ int power_mgr_ble_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ct
         if (ble_hs_mbuf_to_flat(ctxt->om, data, sizeof(data), &copied) != 0 || copied != 3) return BLE_ATT_ERR_UNLIKELY;
 
         uint8_t cmd = data[0];
-        int16_t param = (int16_t)((data[1] << 8) | data[2]);
+        uint16_t param = (uint16_t)((data[1] << 8) | data[2]);  // Use uint16_t for voltage thresholds
         esp_err_t err = ESP_OK;
 
         switch (cmd) {
             // 原有命令（兼容）
-            case 0x01: err = power_mgr_set_thresholds((uint16_t)param, s_wake_mv); break;
-            case 0x02: err = power_mgr_set_thresholds(s_sleep_mv, (uint16_t)param); break;
-            case 0x03: err = power_mgr_force_sleep(); break;
-            case 0x04: err = ESP_OK; break; // 强制唤醒（无操作）
-
-            // v004新增命令
-            case 0x11: // 设置高温阈值
-                s_temp_hi = param;
-                err = nvs_store_thresholds();
+            case 0x01: // 设置睡眠电压阈值 - use uint16_t directly
+                err = power_mgr_set_thresholds(param, s_wake_mv);
+                break;
+            case 0x02: // 设置唤醒电压阈值 - use uint16_t directly
+                err = power_mgr_set_thresholds(s_sleep_mv, param);
+                break;
+            case 0x03: // 强制睡眠
+                err = power_mgr_force_sleep();
+                break;
+            case 0x04: // 强制唤醒（无操作）
+                err = ESP_OK;
                 break;
 
-            case 0x12: // 设置恢复阈值
-                s_temp_rec = param;
+            // v004新增命令 - temperature commands can use int16_t
+            case 0x11: { // 设置高温阈值
+                int16_t temp_param = (int16_t)param;  // Convert back to int16_t for temperature
+                s_temp_hi = temp_param;
                 err = nvs_store_thresholds();
                 break;
+            }
+
+            case 0x12: { // 设置恢复阈值
+                int16_t temp_param = (int16_t)param;  // Convert back to int16_t for temperature
+                s_temp_rec = temp_param;
+                err = nvs_store_thresholds();
+                break;
+            }
 
             default:
                 return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
