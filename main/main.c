@@ -61,6 +61,8 @@ void app_main(void) {
     // 设置调试日志级别
     esp_log_level_set("current_sensor", ESP_LOG_DEBUG);
     esp_log_level_set("app", ESP_LOG_DEBUG);
+    esp_log_level_set("ds18b20_rmt", ESP_LOG_DEBUG);
+    esp_log_level_set("temp_mgr", ESP_LOG_DEBUG);
 
     // 检查重启原因
     esp_reset_reason_t reset_reason = esp_reset_reason();

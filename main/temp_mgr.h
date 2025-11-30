@@ -67,8 +67,7 @@ typedef struct {
 } temp_queue_event_t;
 
 // 默认采样间隔 (ms)
-#define TEMP_DEFAULT_SAMPLING_INTERVAL    5000
-#define TEMP_FAST_SAMPLING_INTERVAL       1000
+#define TEMP_DEFAULT_SAMPLING_INTERVAL    1000
 #define TEMP_STALE_TIMEOUT_MS            30000  // 30秒后数据被认为过期
 
 // === 兼容性API (保持向后兼容) ===
