@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
+#include "storage.h"
 
 static const char *TAG = "pwm";
 
@@ -172,6 +173,7 @@ esp_err_t pwm_control_init(void) {
         return err;
     }
 
+    // Initialize all channels with default values first
     for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
         s_states[i] = 0;
         ledc_channel_t ledc_ch = ledc_channel_for_idx(i);
@@ -203,6 +205,33 @@ esp_err_t pwm_control_init(void) {
         s_pattern[i].in_pause = false;
         s_pattern[i].phase_on = false;
     }
+
+    // Load and apply saved channel states from storage
+    uint8_t saved_states[PWM_CHANNEL_COUNT];
+    esp_err_t storage_err = storage_read_states(saved_states);
+    if (storage_err == ESP_OK) {
+        bool has_non_zero_states = false;
+        for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
+            if (saved_states[i] != 0) {
+                has_non_zero_states = true;
+                break;
+            }
+        }
+
+        if (has_non_zero_states) {
+            ESP_LOGI(TAG, "Restoring %d saved channel states", PWM_CHANNEL_COUNT);
+            err = pwm_control_load_and_apply(saved_states);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to apply saved channel states: %s", esp_err_to_name(err));
+                // Don't return error - continue with default states
+            }
+        } else {
+            ESP_LOGI(TAG, "No saved channel states found, using defaults");
+        }
+    } else {
+        ESP_LOGW(TAG, "Failed to read saved channel states: %s", esp_err_to_name(storage_err));
+    }
+
     return ESP_OK;
 }
 
