@@ -96,9 +96,9 @@ static esp_err_t nvs_store_thresholds(void) {
     return ESP_OK;
 }
 
-// static uint16_t ulp_get_voltage_mv(void) { return ulp_last_mv & 0xFFFF; }
+static uint16_t ulp_get_voltage_mv(void) { return ulp_last_mv & 0xFFFF; }
 
-static uint16_t ulp_get_voltage_mv(void) { return 13500; }
+// static uint16_t ulp_get_voltage_mv(void) { return 13500; }
 
 static void ulp_share_params(void) {
     ulp_wake_mv = s_wake_mv;
