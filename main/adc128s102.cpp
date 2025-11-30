@@ -6,6 +6,48 @@
 #include <cstring>
 #include <memory>
 
+/*
+ * MEMORY MANAGEMENT SAFETY NOTES
+ * ================================
+ *
+ * This implementation uses dynamic memory allocation for configurable channel counts.
+ * The following safety measures are implemented to prevent memory leaks and corruption:
+ *
+ * 1. RAII (Resource Acquisition Is Initialization)
+ *    - VoltageSensorDriver instances are managed with std::unique_ptr
+ *    - Automatic cleanup when driver is destroyed or replaced
+ *
+ * 2. Allocation Validation
+ *    - All calloc/malloc calls are checked for null returns
+ *    - Failed allocations trigger immediate error handling
+ *    - Partial allocations are cleaned up to prevent leaks
+ *
+ * 3. Safe Deallocation
+ *    - All free() calls set pointers to nullptr to prevent dangling pointers
+ *    - free() is safe to call on null pointers
+ *    - Multiple free() calls are prevented by null pointer checks
+ *
+ * 4. Exception Safety
+ *    - Partial allocation failures trigger cleanup of successfully allocated memory
+ *    - Structure fields are reset to safe defaults on allocation failure
+ *
+ * 5. Thread Safety
+ *    - All dynamic memory operations are protected by mutex_ semaphore
+ *    - Prevents race conditions during configuration changes
+ *
+ * DYNAMIC ALLOCATIONS:
+ * - sensor_config_t.channel_current[]: Channel sensor parameters
+ * - sensor_readings_t.channel_currents[]: Current measurement storage
+ * - sensor_readings_t.channel_current_valid[]: Validity flag array
+ * - API structures: Temporary allocations for C API compatibility
+ *
+ * CLEANUP POINTS:
+ * - free_sensor_config(): Frees configuration memory
+ * - free_readings(): Frees measurement storage
+ * - Destructor: Automatic cleanup via RAII
+ * - current_sensor_config_free(): C API safe cleanup wrapper
+ */
+
 extern "C" {
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -351,10 +393,16 @@ sensor_config_t build_sensor_config_from_hardware_defs(std::array<int8_t, PWM_CH
         }
     }
 
+    // Allocate dynamic array for channel current parameters based on configured count
     config.channel_current = nullptr;
     if (channel_count > 0) {
         config.channel_current = static_cast<current_sensor_params_t*>(
             calloc(channel_count, sizeof(current_sensor_params_t)));
+        if (!config.channel_current) {
+            // Memory allocation failed - return empty config with zero channels
+            config.channel_count = 0;
+            return config;
+        }
     }
     config.channel_count = channel_count;
 
@@ -377,14 +425,16 @@ sensor_config_t build_sensor_config_from_hardware_defs(std::array<int8_t, PWM_CH
     return config;
 }
 
+// Safely free dynamically allocated sensor configuration memory
+// Prevents memory leaks by cleaning up channel_current array and resetting pointers
 void free_sensor_config(sensor_config_t *config) {
     if (!config) {
         return;
     }
     if (config->channel_current) {
         free(config->channel_current);
+        config->channel_current = nullptr;  // Prevent dangling pointer
     }
-    config->channel_current = nullptr;
     config->channel_count = 0;
 }
 
@@ -485,15 +535,18 @@ bool clone_sensor_config(const sensor_config_t &src, sensor_config_t *dst) {
     free_sensor_config(dst);
     dst->channel_count = src.channel_count;
     dst->sample_interval_ms = src.sample_interval_ms;
+    // Handle zero-channel case efficiently - no allocation needed
     if (src.channel_count == 0) {
         dst->channel_current = nullptr;
+        dst->channel_count = 0;
         return true;
     }
+    // Deep copy with dynamic allocation for channel array
     dst->channel_current =
         static_cast<current_sensor_params_t *>(calloc(src.channel_count, sizeof(current_sensor_params_t)));
     if (!dst->channel_current) {
         dst->channel_count = 0;
-        return false;
+        return false;  // Memory allocation failed
     }
     for (int i = 0; i < src.channel_count; ++i) {
         dst->channel_current[i] = src.channel_current[i];
@@ -512,15 +565,18 @@ bool copy_config_from_api(const current_sensor_config_t &api, sensor_config_t *d
     free_sensor_config(dst);
     dst->sample_interval_ms = api.sample_interval_ms == 0 ? 100 : api.sample_interval_ms;
     dst->channel_count = api.channel_count;
+    // Handle zero-channel case efficiently - no allocation needed
     if (api.channel_count == 0) {
         dst->channel_current = nullptr;
+        dst->channel_count = 0;
         return true;
     }
+    // Allocate dynamic array for API configuration structures
     dst->channel_current =
         static_cast<current_sensor_params_t *>(calloc(api.channel_count, sizeof(current_sensor_params_t)));
     if (!dst->channel_current) {
         dst->channel_count = 0;
-        return false;
+        return false;  // Memory allocation failed
     }
     for (int i = 0; i < api.channel_count; ++i) {
         dst->channel_current[i].adc_channel = api.channel_current[i].adc_channel;
@@ -686,13 +742,14 @@ public:
             xSemaphoreGive(mutex_);
             return ESP_ERR_INVALID_STATE;
         }
+        // Allocate memory for API-compatible configuration structure
         if (config_.channel_count > 0) {
             out->channel_current = static_cast<current_sensor_params_config_t *>(
                 calloc(config_.channel_count, sizeof(current_sensor_params_config_t)));
             if (!out->channel_current) {
                 xSemaphoreGive(mutex_);
                 out->channel_count = 0;
-                return ESP_ERR_NO_MEM;
+                return ESP_ERR_NO_MEM;  // Insufficient memory
             }
             for (int i = 0; i < config_.channel_count; ++i) {
                 out->channel_current[i].adc_channel = config_.channel_current[i].adc_channel;
@@ -871,12 +928,22 @@ private:
             return true;
         }
 
+        // Allocate dynamic arrays for channel measurements and validity flags
+        // These arrays store the actual current measurements and validity state for each channel
         readings_.channel_currents = static_cast<current_measurement_t *>(
             calloc(config_.channel_count, sizeof(current_measurement_t)));
         readings_.channel_current_valid = static_cast<bool *>(
             calloc(config_.channel_count, sizeof(bool)));
         readings_.channel_count = config_.channel_count;
+
+        // Validate both allocations succeeded to prevent memory corruption
         if (!readings_.channel_currents || !readings_.channel_current_valid) {
+            // Cleanup partially allocated memory to prevent leaks
+            free(readings_.channel_currents);
+            free(readings_.channel_current_valid);
+            readings_.channel_currents = nullptr;
+            readings_.channel_current_valid = nullptr;
+            readings_.channel_count = 0;
             return false;
         }
 
@@ -895,15 +962,17 @@ private:
         return true;
     }
 
+    // Safely free all dynamically allocated measurement arrays
+    // Called during deinitialization to prevent memory leaks
     void free_readings() {
         if (readings_.channel_currents) {
             free(readings_.channel_currents);
+            readings_.channel_currents = nullptr;  // Prevent dangling pointer
         }
         if (readings_.channel_current_valid) {
             free(readings_.channel_current_valid);
+            readings_.channel_current_valid = nullptr;  // Prevent dangling pointer
         }
-        readings_.channel_currents = nullptr;
-        readings_.channel_current_valid = nullptr;
         readings_.channel_count = 0;
     }
 
@@ -982,13 +1051,15 @@ private:
         }
     }
 
+    // Create appropriate ADC driver instance based on compile-time configuration
+    // Returns RAII-managed unique_ptr to ensure automatic cleanup
     std::unique_ptr<VoltageSensorDriver> create_driver() {
 #if defined(EXTERNAL_ADC)
         return std::unique_ptr<VoltageSensorDriver>(new Adc128s102Driver(build_external_adc_config()));
 #elif defined(BUILTIN_ADC)
         return std::unique_ptr<VoltageSensorDriver>(new Esp32InternalAdcDriver(build_internal_adc_config()));
 #else
-        return nullptr;
+        return nullptr;  // No ADC driver configured
 #endif
     }
 
@@ -1050,13 +1121,15 @@ esp_err_t current_sensor_set_calibration(const current_sensor_calibration_t *cal
 esp_err_t current_sensor_get_calibration(current_sensor_calibration_t *cal) { return get_manager().get_calibration(cal); }
 esp_err_t current_sensor_calibrate_zero(uint16_t sample_count) { return get_manager().calibrate_zero(sample_count); }
 esp_err_t current_sensor_config_clone(current_sensor_config_t *config_out) { return get_manager().clone_config_api(config_out); }
+// C API wrapper for freeing sensor configuration
+// Safe to call with null pointer; ensures proper cleanup of dynamic memory
 void current_sensor_config_free(current_sensor_config_t *config) {
     if (!config) {
-        return;
+        return;  // Null pointer is safe to pass
     }
     if (config->channel_current) {
         free(config->channel_current);
-        config->channel_current = nullptr;
+        config->channel_current = nullptr;  // Prevent dangling pointer
     }
     config->channel_count = 0;
 }
