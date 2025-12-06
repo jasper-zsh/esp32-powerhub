@@ -151,6 +151,17 @@ void app_main(void) {
         return;  // PWM是核心功能
     }
 
+    // 8.1. 如果是从深度睡眠唤醒，恢复RTC GPIO配置
+    if (reset_reason == ESP_RST_DEEPSLEEP) {
+        ESP_LOGI(TAG, "Waking from deep sleep - restoring RTC GPIO configuration");
+        esp_err_t rtc_restore_err = pwm_control_restore_rtc_gpio_wake();
+        if (rtc_restore_err != ESP_OK) {
+            ESP_LOGW(TAG, "RTC GPIO restoration failed: %s", esp_err_to_name(rtc_restore_err));
+        } else {
+            ESP_LOGI(TAG, "RTC GPIO restoration completed successfully");
+        }
+    }
+
     // 9. 初始化ADC128S102 (电流监测)
     ret = init_current_sensor();
     if (ret != ESP_OK) {

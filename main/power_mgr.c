@@ -291,6 +291,13 @@ esp_err_t power_mgr_force_sleep(void) {
     uint8_t states[PWM_CHANNEL_COUNT > 0 ? PWM_CHANNEL_COUNT : 1];
     storage_read_states(states);
     storage_write_states(states);
+
+    // Shut down all PWM channels before entering deep sleep
+    esp_err_t pwm_err = pwm_control_shutdown_all();
+    if (pwm_err != ESP_OK) {
+        ESP_LOGW(TAG, "PWM shutdown failed: %s", esp_err_to_name(pwm_err));
+    }
+
     (void)led_status_set_bluetooth_advertising(false);
     (void)led_status_set_bluetooth_connected(false);
     (void)led_status_set_low_battery(false);

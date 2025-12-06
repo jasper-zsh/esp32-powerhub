@@ -2,6 +2,7 @@
 
 #include "driver/ledc.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
@@ -380,4 +381,166 @@ esp_err_t pwm_control_start_strobe(uint8_t channel, uint8_t count, uint16_t tota
     xTimerChangePeriod(ps->timer, tick, 0);
     xTimerStart(ps->timer, 0);
     return ESP_OK;
+}
+
+esp_err_t pwm_control_shutdown_all(void) {
+    esp_err_t first_err = ESP_OK;
+
+    ESP_LOGI(TAG, "Shutting down all PWM channels for deep sleep");
+
+    // Stop all patterns and set all channels to low state
+    for (int i = 0; i < PWM_CHANNEL_COUNT; ++i) {
+        // Stop any running pattern on this channel
+        esp_err_t pattern_err = pwm_control_stop_pattern(i);
+        if (pattern_err != ESP_OK && first_err == ESP_OK) {
+            first_err = pattern_err;
+        }
+
+        // Set channel to low state (0% duty cycle) immediately
+        esp_err_t apply_err = apply_value_internal(i, 0, 0, false, true);
+        if (apply_err != ESP_OK && first_err == ESP_OK) {
+            first_err = apply_err;
+        }
+
+        // Ensure LEDC output is set to 0 duty
+        ledc_channel_t ledc_ch = ledc_channel_for_idx(i);
+        esp_err_t duty_err = ledc_set_duty(s_mode, ledc_ch, 0);
+        if (duty_err != ESP_OK && first_err == ESP_OK) {
+            first_err = duty_err;
+        }
+        duty_err = ledc_update_duty(s_mode, ledc_ch);
+        if (duty_err != ESP_OK && first_err == ESP_OK) {
+            first_err = duty_err;
+        }
+    }
+
+    if (first_err != ESP_OK) {
+        ESP_LOGW(TAG, "PWM shutdown completed with errors: %s", esp_err_to_name(first_err));
+    } else {
+        ESP_LOGI(TAG, "All PWM channels shut down successfully");
+    }
+
+    // Configure RTC GPIOs for deep sleep
+    esp_err_t rtc_err = pwm_control_configure_rtc_gpio_deep_sleep();
+    if (rtc_err != ESP_OK && first_err == ESP_OK) {
+        first_err = rtc_err;
+    }
+
+    return first_err;
+}
+
+esp_err_t pwm_control_configure_rtc_gpio_deep_sleep(void) {
+    esp_err_t first_err = ESP_OK;
+
+    ESP_LOGI(TAG, "Configuring RTC GPIOs for deep sleep (GPIOs 8-13)");
+
+    // Configure GPIOs 8-13 as RTC GPIOs (PWM channels CH1-CH6)
+    // All GPIOs 8-13 are RTC-capable on ESP32-S3
+
+    const int rtc_gpios[] = {8, 9, 10, 11, 12, 13};
+    const int rtc_gpio_count = sizeof(rtc_gpios) / sizeof(rtc_gpios[0]);
+
+    for (int i = 0; i < rtc_gpio_count; i++) {
+        int gpio_num = rtc_gpios[i];
+
+        ESP_LOGI(TAG, "Configuring GPIO %d as RTC GPIO for deep sleep", gpio_num);
+
+        // Configure GPIO as RTC GPIO, output low
+        esp_err_t rtc_gpio_err = rtc_gpio_init(gpio_num);
+        if (rtc_gpio_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to init RTC GPIO %d: %s", gpio_num, esp_err_to_name(rtc_gpio_err));
+            if (first_err == ESP_OK) first_err = rtc_gpio_err;
+            continue;
+        }
+
+        rtc_gpio_err = rtc_gpio_set_direction(gpio_num, RTC_GPIO_MODE_OUTPUT_ONLY);
+        if (rtc_gpio_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set direction for RTC GPIO %d: %s", gpio_num, esp_err_to_name(rtc_gpio_err));
+            if (first_err == ESP_OK) first_err = rtc_gpio_err;
+            continue;
+        }
+
+        rtc_gpio_err = rtc_gpio_set_level(gpio_num, 0); // Set low
+        if (rtc_gpio_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set level for RTC GPIO %d: %s", gpio_num, esp_err_to_name(rtc_gpio_err));
+            if (first_err == ESP_OK) first_err = rtc_gpio_err;
+            continue;
+        }
+
+        // Enable hold to maintain state during deep sleep
+        rtc_gpio_err = rtc_gpio_hold_en(gpio_num);
+        if (rtc_gpio_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to enable hold for RTC GPIO %d: %s", gpio_num, esp_err_to_name(rtc_gpio_err));
+            if (first_err == ESP_OK) first_err = rtc_gpio_err;
+            continue;
+        }
+
+        ESP_LOGI(TAG, "RTC GPIO %d configured: output low, hold enabled", gpio_num);
+    }
+
+    // Enable force hold for all RTC IOs to ensure state is maintained during deep sleep
+    esp_err_t force_hold_err = rtc_gpio_force_hold_en_all();
+    if (force_hold_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable force hold for all RTC IOs: %s", esp_err_to_name(force_hold_err));
+        if (first_err == ESP_OK) first_err = force_hold_err;
+    } else {
+        ESP_LOGI(TAG, "Force hold enabled for all RTC IOs");
+    }
+
+    if (first_err == ESP_OK) {
+        ESP_LOGI(TAG, "RTC GPIO deep sleep configuration completed successfully");
+    } else {
+        ESP_LOGW(TAG, "RTC GPIO configuration completed with errors");
+    }
+
+    return first_err;
+}
+
+esp_err_t pwm_control_restore_rtc_gpio_wake(void) {
+    esp_err_t first_err = ESP_OK;
+
+    ESP_LOGI(TAG, "Restoring RTC GPIOs from deep sleep");
+
+    // Disable force hold for all RTC IOs first
+    esp_err_t force_hold_err = rtc_gpio_force_hold_dis_all();
+    if (force_hold_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to disable force hold: %s", esp_err_to_name(force_hold_err));
+        if (first_err == ESP_OK) first_err = force_hold_err;
+    } else {
+        ESP_LOGI(TAG, "Force hold disabled for all RTC IOs");
+    }
+
+    // Restore GPIOs 8-13 from RTC mode to normal operation
+    const int rtc_gpios[] = {8, 9, 10, 11, 12, 13};
+    const int rtc_gpio_count = sizeof(rtc_gpios) / sizeof(rtc_gpios[0]);
+
+    for (int i = 0; i < rtc_gpio_count; i++) {
+        int gpio_num = rtc_gpios[i];
+
+        ESP_LOGI(TAG, "Restoring GPIO %d from RTC mode", gpio_num);
+
+        // Disable hold first
+        esp_err_t hold_err = rtc_gpio_hold_dis(gpio_num);
+        if (hold_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to disable hold for RTC GPIO %d: %s", gpio_num, esp_err_to_name(hold_err));
+        }
+
+        // Initialize GPIO back to normal mode (this will disconnect from RTC)
+        esp_err_t init_err = rtc_gpio_deinit(gpio_num);
+        if (init_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to deinit RTC GPIO %d: %s", gpio_num, esp_err_to_name(init_err));
+            if (first_err == ESP_OK) first_err = init_err;
+            continue;
+        }
+
+        ESP_LOGI(TAG, "RTC GPIO %d restored to normal mode", gpio_num);
+    }
+
+    if (first_err == ESP_OK) {
+        ESP_LOGI(TAG, "RTC GPIO restoration completed successfully");
+    } else {
+        ESP_LOGW(TAG, "RTC GPIO restoration completed with errors");
+    }
+
+    return first_err;
 }

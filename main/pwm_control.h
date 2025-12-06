@@ -48,6 +48,15 @@ esp_err_t pwm_control_start_blink(uint8_t channel, uint16_t period_ms);
 // After a burst, if pause_ms > 0, stays off for pause_ms then repeats; if pause_ms == 0, stops and turns off.
 esp_err_t pwm_control_start_strobe(uint8_t channel, uint8_t count, uint16_t dur_ms, uint16_t pause_ms);
 
+// Shut down all PWM channels: stop patterns and set all channels to low state.
+esp_err_t pwm_control_shutdown_all(void);
+
+// Configure RTC GPIOs for deep sleep: set GPIOs 8-12 to RTC mode with hold
+esp_err_t pwm_control_configure_rtc_gpio_deep_sleep(void);
+
+// Restore RTC GPIOs on wake: disable hold and restore to normal LEDC mode
+esp_err_t pwm_control_restore_rtc_gpio_wake(void);
+
 #ifdef __cplusplus
 }
 #endif
